@@ -7470,8 +7470,10 @@ if (dimosMode) {
 
       // Eval harness — scores objectDistance rubric when triggered by dimsim eval runner
       const { EvalHarness } = await import("./dimos/evalHarness.ts");
+      const channel = new URLSearchParams(location.search).get("channel") || undefined;
       const evalHarness = new EvalHarness({
         bridge,
+        channel,
         getSceneState: () => {
           const enriched = assets.map(a => {
             const obj = assetsGroup.getObjectByName(`asset:${a.id}`);

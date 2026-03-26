@@ -32,6 +32,7 @@ export interface EvalHarnessOptions {
   bridge: DimosBridge;
   getSceneState: () => SceneState;
   getAgentPose: () => AgentPose | null;
+  channel?: string;
 }
 
 declare global {
@@ -42,16 +43,18 @@ export class EvalHarness {
   bridge: DimosBridge;
   getSceneState: () => SceneState;
   getAgentPose: () => AgentPose | null;
+  channel: string;
 
   _workflow: Workflow | null = null;
   _startTime = 0;
   _timeoutTimer: ReturnType<typeof setTimeout> | null = null;
   _overlay: HTMLDivElement | null = null;
 
-  constructor({ bridge, getSceneState, getAgentPose }: EvalHarnessOptions) {
+  constructor({ bridge, getSceneState, getAgentPose, channel }: EvalHarnessOptions) {
     this.bridge = bridge;
     this.getSceneState = getSceneState;
     this.getAgentPose = getAgentPose;
+    this.channel = channel || "";
     this._hookBridgeMessages();
   }
 
@@ -89,10 +92,14 @@ export class EvalHarness {
   }
 
   _send(cmd: Record<string, any>): void {
+    // Tag outgoing messages with channel for multi-page routing
+    if (this.channel) cmd.channel = this.channel;
     this.bridge.sendCommand(cmd);
   }
 
-  async _handleCommand(cmd: { type: string; workflow?: Workflow; [k: string]: any }): Promise<void> {
+  async _handleCommand(cmd: { type: string; channel?: string; workflow?: Workflow; [k: string]: any }): Promise<void> {
+    // Channel filtering: if cmd has a channel and it doesn't match ours, ignore
+    if (this.channel && cmd.channel && cmd.channel !== this.channel) return;
     console.log("[eval] command:", cmd.type);
     switch (cmd.type) {
       case "startWorkflow":

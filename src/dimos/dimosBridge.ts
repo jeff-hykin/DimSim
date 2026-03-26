@@ -132,8 +132,12 @@ export class DimosBridge {
   }
 
   connect(): void {
+    // Read channel from URL param (for multi-page parallel evals)
+    const channel = new URLSearchParams(location.search).get("channel") || "";
+    const channelSuffix = channel ? `&channel=${channel}` : "";
+
     // Control socket: odom out, cmd_vel in
-    this.wsControl = new WebSocket(this.wsUrl + "?ch=control");
+    this.wsControl = new WebSocket(this.wsUrl + "?ch=control" + channelSuffix);
     this.wsControl.binaryType = "arraybuffer";
 
     this.wsControl.onopen = () => {
@@ -172,7 +176,7 @@ export class DimosBridge {
     this.wsControl.onerror = () => {};
 
     // Sensor socket: images + lidar out (no incoming expected)
-    this.wsSensors = new WebSocket(this.wsUrl + "?ch=sensors");
+    this.wsSensors = new WebSocket(this.wsUrl + "?ch=sensors" + channelSuffix);
     this.wsSensors.binaryType = "arraybuffer";
 
     this.wsSensors.onopen = () => {

@@ -6,6 +6,7 @@
  * - TWO WebSocket channels: control (odom/cmd_vel) and sensors (images/lidar)
  *   Separate TCP streams so large sensor data never blocks real-time odom.
  * - LCM multicast relay (WS ↔ LCM)
+ * - Per-channel isolation for multi-page parallel evals
  * - Static file server for the pre-built DimSim frontend (dist/)
  * - Uses vendored LCM transport with joinMulticastV4 fix
  */
@@ -20,6 +21,8 @@ import { geometry_msgs } from "@dimos/msgs";
 
 // Magic prefix for Rapier world snapshot (ASCII "DSSN")
 const SNAPSHOT_MAGIC = 0x4453534E;
+const DEFAULT_LCM_PORT = 7667;
+const DEFAULT_LCM_HOST = "239.255.76.67";
 
 export interface BridgeServerOptions {
   port: number;
@@ -27,34 +30,104 @@ export interface BridgeServerOptions {
   scene?: string;
   evalOnly?: boolean;
   headless?: boolean;
+  channels?: string[];
+  lcmBasePort?: number;
+}
+
+/** Per-channel state: each channel gets its own LCM, physics, lidar, and WS client sets. */
+interface ChannelState {
+  name: string;
+  controlClients: Set<WebSocket>;
+  activeControlClient: WebSocket | null;
+  sensorClients: Set<WebSocket>;
+  lcm: LCM | null;
+  sentSeqs: Set<number>;
+  serverLidar: ServerLidar | null;
+  serverPhysics: ServerPhysics | null;
 }
 
 export async function startBridgeServer(options: BridgeServerOptions) {
-  const { port, distDir, scene, evalOnly = false, headless = false } = options;
+  const {
+    port, distDir, scene,
+    evalOnly = false, headless = false,
+    channels, lcmBasePort = DEFAULT_LCM_PORT,
+  } = options;
 
-  // Control clients receive LCM→WS relay (cmd_vel from dimos)
-  const controlClients = new Set<WebSocket>();
-  let activeControlClient: WebSocket | null = null;
-  // Sensor clients only send WS→LCM (no LCM→WS needed)
-  const sensorClients = new Set<WebSocket>();
+  // Build channel list: if channels provided, use them; otherwise single default
+  const channelNames = channels && channels.length > 0
+    ? channels
+    : [""];  // empty string = default (backward compat, no channel routing)
 
-  let lcm: LCM | null = null;
-  const sentSeqs = new Set<number>();
-  let serverLidar: ServerLidar | null = null;
-  let serverPhysics: ServerPhysics | null = null;
+  const channelMap = new Map<string, ChannelState>();
+
+  for (let i = 0; i < channelNames.length; i++) {
+    const name = channelNames[i];
+    const lcmPort = lcmBasePort + i;
+    const lcmUrl = `udpm://${DEFAULT_LCM_HOST}:${lcmPort}?ttl=0`;
+    const state: ChannelState = {
+      name,
+      controlClients: new Set(),
+      activeControlClient: null,
+      sensorClients: new Set(),
+      lcm: null,
+      sentSeqs: new Set(),
+      serverLidar: null,
+      serverPhysics: null,
+    };
+
+    if (!evalOnly) {
+      state.lcm = new LCM(lcmUrl);
+      await state.lcm.start();
+      console.log(`[bridge] channel "${name || "default"}" LCM on ${lcmUrl}`);
+
+      // LCM → WS: forward external packets to this channel's active control client
+      state.lcm.subscribePacket((packet: Uint8Array) => {
+        if (packet.length < 8) return;
+        const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
+        const magic = view.getUint32(0, false);
+        if (magic !== MAGIC_SHORT) return;
+
+        const seq = view.getUint32(4, false);
+        if (state.sentSeqs.has(seq)) {
+          state.sentSeqs.delete(seq);
+          return;
+        }
+        if (state.sentSeqs.size > 1000) state.sentSeqs.clear();
+
+        const copy = packet.slice();
+        const client = state.activeControlClient;
+        if (client && client.readyState === WebSocket.OPEN) client.send(copy);
+      });
+    }
+
+    channelMap.set(name, state);
+  }
+
+  /** Resolve channel from WS query param. Falls back to default ("") if not found. */
+  function resolveChannel(channelParam: string | null): ChannelState {
+    if (channelParam && channelMap.has(channelParam)) {
+      return channelMap.get(channelParam)!;
+    }
+    // If no channel param or unknown, use default (first channel)
+    return channelMap.values().next().value!;
+  }
 
   // -- Server-side init from Rapier snapshot ----------------------------------
-  async function initServerSystems(snapshot: Uint8Array, spawnPos?: { x: number; y: number; z: number }): Promise<void> {
-    if (serverLidar) { serverLidar.stop(); serverLidar = null; }
-    if (serverPhysics) { serverPhysics.stop(); serverPhysics = null; }
+  async function initServerSystems(
+    chState: ChannelState,
+    snapshot: Uint8Array,
+    spawnPos?: { x: number; y: number; z: number },
+  ): Promise<void> {
+    if (chState.serverLidar) { chState.serverLidar.stop(); chState.serverLidar = null; }
+    if (chState.serverPhysics) { chState.serverPhysics.stop(); chState.serverPhysics = null; }
+    if (!chState.lcm) return;
+
     try {
       const RAPIER = await import("@dimforge/rapier3d-compat");
       await RAPIER.init();
       const world = RAPIER.World.restoreSnapshot(snapshot);
-      if (!world) { console.error("[bridge] failed to restore Rapier snapshot"); return; }
+      if (!world) { console.error(`[bridge:${chState.name || "default"}] failed to restore Rapier snapshot`); return; }
 
-      // Remove non-fixed bodies (player capsule, AI agents) — server world is static.
-      // ServerPhysics will create its own agent body.
       const bodiesToRemove: any[] = [];
       world.bodies.forEach((body: any) => {
         if (!body.isFixed()) bodiesToRemove.push(body.handle);
@@ -62,66 +135,33 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       for (const handle of bodiesToRemove) {
         world.removeRigidBody(world.getRigidBody(handle));
       }
-      console.log(`[bridge] Rapier snapshot restored (removed ${bodiesToRemove.length} non-fixed bodies)`);
+      console.log(`[bridge:${chState.name || "default"}] Rapier snapshot restored (removed ${bodiesToRemove.length} non-fixed bodies)`);
 
-      // Server-side physics (cmd_vel → collision-aware movement → odom)
-      serverPhysics = new ServerPhysics(lcm!, world, RAPIER, sentSeqs);
+      chState.serverPhysics = new ServerPhysics(chState.lcm, world, RAPIER, chState.sentSeqs);
       if (spawnPos) {
-        serverPhysics.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
+        chState.serverPhysics.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
       }
 
-      // Server-side lidar (uses physics pose for ray origin)
-      serverLidar = new ServerLidar(lcm!, world, RAPIER, sentSeqs);
-      serverLidar.setExcludeBody(serverPhysics.getBody());
+      chState.serverLidar = new ServerLidar(chState.lcm, world, RAPIER, chState.sentSeqs);
+      chState.serverLidar.setExcludeBody(chState.serverPhysics.getBody());
 
-      // Wire physics pose → lidar pose (no more browser odom dependency)
-      serverPhysics.setOnPoseUpdate((x, y, z, yaw) => {
+      chState.serverPhysics.setOnPoseUpdate((x, y, z, yaw) => {
         const qw = Math.cos(yaw / 2);
         const qy = Math.sin(yaw / 2);
-        serverLidar!.updatePose(x, y, z, 0, qy, 0, qw);
+        chState.serverLidar!.updatePose(x, y, z, 0, qy, 0, qw);
 
-        // Send position to browser for visual sync
         const msg = JSON.stringify({ type: "pose", x, y, z, yaw });
-        const client = activeControlClient;
+        const client = chState.activeControlClient;
         if (client && client.readyState === WebSocket.OPEN) {
           try { client.send(msg); } catch { /* ignore */ }
         }
       });
 
-      serverPhysics.start();
-      serverLidar.start();
+      chState.serverPhysics.start();
+      chState.serverLidar.start();
     } catch (e) {
-      console.error("[bridge] server systems init error:", e);
+      console.error(`[bridge:${chState.name || "default"}] server systems init error:`, e);
     }
-  }
-
-  if (!evalOnly) {
-    lcm = new LCM();
-    await lcm.start();
-
-    // LCM → WS: forward external packets to CONTROL clients only
-    // sentSeqs filters echo (packets we published ourselves).
-    // NOTE: no global maxRelaySeq filter — multiple external publishers
-    // (planner, mapper, etc.) have independent seq counters so a single
-    // global max would silently drop packets from slower publishers.
-    lcm.subscribePacket((packet: Uint8Array) => {
-      if (packet.length < 8) return;
-      const view = new DataView(packet.buffer, packet.byteOffset, packet.byteLength);
-      const magic = view.getUint32(0, false);
-      if (magic !== MAGIC_SHORT) return;
-
-      const seq = view.getUint32(4, false);
-      if (sentSeqs.has(seq)) {
-        sentSeqs.delete(seq);
-        return;
-      }
-      // Prevent unbounded growth if echoes are lost
-      if (sentSeqs.size > 1000) sentSeqs.clear();
-
-      const copy = packet.slice();
-      const client = activeControlClient;
-      if (client && client.readyState === WebSocket.OPEN) client.send(copy);
-    });
   }
 
   // ── HTTP + WebSocket server ─────────────────────────────────────────────
@@ -132,41 +172,42 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       const { socket, response } = Deno.upgradeWebSocket(req);
       socket.binaryType = "arraybuffer";
       const ch = url.searchParams.get("ch") || "control";
+      const channelParam = url.searchParams.get("channel");
+      const chState = resolveChannel(channelParam);
       const isSensor = ch === "sensors";
+      const logPrefix = `[bridge:${chState.name || "default"}]`;
 
       if (isSensor) {
         // ── SENSOR WebSocket ──────────────────────────────────────────
-        socket.onopen = () => { sensorClients.add(socket); console.log(`[bridge] sensor WS+ (${sensorClients.size})`); };
-        socket.onclose = () => { sensorClients.delete(socket); console.log(`[bridge] sensor WS-`); };
-        socket.onerror = () => sensorClients.delete(socket);
+        socket.onopen = () => { chState.sensorClients.add(socket); console.log(`${logPrefix} sensor WS+ (${chState.sensorClients.size})`); };
+        socket.onclose = () => { chState.sensorClients.delete(socket); console.log(`${logPrefix} sensor WS-`); };
+        socket.onerror = () => chState.sensorClients.delete(socket);
 
         let _sensorLogN = 0;
         socket.onmessage = (event: MessageEvent) => {
-          if (!(event.data instanceof ArrayBuffer) || !lcm) return;
+          if (!(event.data instanceof ArrayBuffer) || !chState.lcm) return;
           const packet = new Uint8Array(event.data);
 
           // Check for Rapier snapshot
-          // Format DSS2: [DSS2 4B][spawnX f32][spawnY f32][spawnZ f32][snapshot...]
-          // Legacy DSSN: [DSSN 4B][snapshot...] (no spawn pos)
           if (packet.length > 4) {
             const dv = new DataView(packet.buffer, packet.byteOffset);
             const magic = dv.getUint32(0, false);
 
-            if (magic === 0x44535332) { // "DSS2" — new format with spawn position
+            if (magic === 0x44535332) { // "DSS2"
               const sx = dv.getFloat32(4, true);
               const sy = dv.getFloat32(8, true);
               const sz = dv.getFloat32(12, true);
               const snapshot = packet.slice(16);
               const spawnPos = { x: sx, y: sy, z: sz };
-              console.log(`[bridge] Rapier snapshot received (${(snapshot.byteLength / 1024).toFixed(0)}KB) spawn=(${sx.toFixed(1)},${sy.toFixed(1)},${sz.toFixed(1)})`);
-              initServerSystems(snapshot, spawnPos);
+              console.log(`${logPrefix} Rapier snapshot received (${(snapshot.byteLength / 1024).toFixed(0)}KB) spawn=(${sx.toFixed(1)},${sy.toFixed(1)},${sz.toFixed(1)})`);
+              initServerSystems(chState, snapshot, spawnPos);
               return;
             }
 
-            if (magic === SNAPSHOT_MAGIC) { // "DSSN" — legacy format
+            if (magic === SNAPSHOT_MAGIC) { // "DSSN"
               const snapshot = packet.slice(4);
-              console.log(`[bridge] Rapier snapshot received (${(snapshot.byteLength / 1024).toFixed(0)}KB) [legacy, no spawn]`);
-              initServerSystems(snapshot);
+              console.log(`${logPrefix} Rapier snapshot received (${(snapshot.byteLength / 1024).toFixed(0)}KB) [legacy, no spawn]`);
+              initServerSystems(chState, snapshot);
               return;
             }
           }
@@ -176,65 +217,57 @@ export async function startBridgeServer(options: BridgeServerOptions) {
             if (decoded && decoded.type === "small") {
               _sensorLogN++;
               if (_sensorLogN <= 3 || _sensorLogN % 10 === 0) {
-                // Extract short channel name for logging
-                const ch = decoded.channel.split("#")[0].replace("/", "");
-                console.log(`[bridge] sensor #${_sensorLogN} ${ch} ${(decoded.data.byteLength / 1024).toFixed(0)}KB`);
+                const chName = decoded.channel.split("#")[0].replace("/", "");
+                console.log(`${logPrefix} sensor #${_sensorLogN} ${chName} ${(decoded.data.byteLength / 1024).toFixed(0)}KB`);
               }
-              sentSeqs.add(lcm.getNextSeq());
-              lcm.publishRaw(decoded.channel, decoded.data).catch(() => {});
+              chState.sentSeqs.add(chState.lcm.getNextSeq());
+              chState.lcm.publishRaw(decoded.channel, decoded.data).catch(() => {});
             }
           } catch { /* ignore */ }
         };
       } else {
         // ── CONTROL WebSocket ─────────────────────────────────────────
         socket.onopen = () => {
-          // First control client becomes the active one (receives LCM→WS relay).
-          // Additional clients (eval runner) coexist without kicking the browser.
-          if (!activeControlClient || activeControlClient.readyState !== WebSocket.OPEN) {
-            activeControlClient = socket;
+          if (!chState.activeControlClient || chState.activeControlClient.readyState !== WebSocket.OPEN) {
+            chState.activeControlClient = socket;
           }
-          controlClients.add(socket);
-          console.log(`[bridge] control WS+ (${controlClients.size})`);
+          chState.controlClients.add(socket);
+          console.log(`${logPrefix} control WS+ (${chState.controlClients.size})`);
         };
-        socket.onerror = () => controlClients.delete(socket);
+        socket.onerror = () => chState.controlClients.delete(socket);
 
         let _odomLogN = 0;
 
         socket.onclose = () => {
-          controlClients.delete(socket);
-          if (activeControlClient === socket) activeControlClient = null;
-          console.log(`[bridge] control WS- (${controlClients.size})`);
+          chState.controlClients.delete(socket);
+          if (chState.activeControlClient === socket) chState.activeControlClient = null;
+          console.log(`${logPrefix} control WS- (${chState.controlClients.size})`);
         };
 
         socket.onmessage = (event: MessageEvent) => {
-          // Text messages: relay to all other control clients (eval runner ↔ browser)
+          // Text messages: relay to all other control clients in this channel
           if (typeof event.data === "string") {
-            for (const client of controlClients) {
+            for (const client of chState.controlClients) {
               if (client !== socket && client.readyState === WebSocket.OPEN) {
                 try { client.send(event.data); } catch { /* ignore */ }
               }
             }
             return;
           }
-          if (!(event.data instanceof ArrayBuffer) || !lcm) return;
-          // Ignore odom uplink from non-active control sockets.
-          if (activeControlClient !== socket) return;
+          if (!(event.data instanceof ArrayBuffer) || !chState.lcm) return;
+          if (chState.activeControlClient !== socket) return;
           const packet = new Uint8Array(event.data);
           try {
             const decoded = decodePacket(packet);
             if (decoded && decoded.type === "small") {
               _odomLogN++;
 
-              // With server-side physics, odom is published by ServerPhysics.
-              // Browser odom uplink is no longer needed — skip LCM relay for odom.
-              if (serverPhysics && decoded.channel === "/odom#geometry_msgs.PoseStamped") {
-                // Ignore browser odom — server physics is authoritative
+              if (chState.serverPhysics && decoded.channel === "/odom#geometry_msgs.PoseStamped") {
                 return;
               }
 
-              // Relay to LCM (async, non-fatal)
-              sentSeqs.add(lcm.getNextSeq());
-              lcm.publishRaw(decoded.channel, decoded.data).catch(() => {});
+              chState.sentSeqs.add(chState.lcm.getNextSeq());
+              chState.lcm.publishRaw(decoded.channel, decoded.data).catch(() => {});
             }
           } catch { /* ignore */ }
         };
@@ -257,10 +290,15 @@ export async function startBridgeServer(options: BridgeServerOptions) {
     return serveDir(req, { fsRoot: distDir, quiet: true });
   });
 
-  console.log(`[bridge] :${port}${evalOnly ? " (eval-only)" : " (LCM bridge)"}`);
+  const channelInfo = channelNames.length > 1
+    ? ` (${channelNames.length} channels: ${channelNames.join(", ")})`
+    : "";
+  console.log(`[bridge] :${port}${evalOnly ? " (eval-only)" : " (LCM bridge)"}${channelInfo}`);
 
-  if (lcm) {
-    await lcm.run();
+  // Run all LCM instances
+  const lcmInstances = [...channelMap.values()].map(s => s.lcm).filter(Boolean) as LCM[];
+  if (lcmInstances.length > 0) {
+    await Promise.all(lcmInstances.map(l => l.run()));
   } else {
     await new Promise(() => {});
   }

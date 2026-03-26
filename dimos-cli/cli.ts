@@ -78,6 +78,7 @@ Dev:
   --port <n>                     Server port (default: 8090)
   --headless                     Launch headless browser (no GUI)
   --render gpu|cpu               Render mode for headless (default: gpu)
+  --channels <n>                 Number of parallel browser pages (multi-instance)
   --eval <workflow>              Run eval after browser connects
   --env <name>                   Environment filter
 
@@ -303,19 +304,35 @@ async function main() {
     const scene = (opts.scene as string) || "hotel-lobby";
     const headless = opts.headless === true;
     const render = ((opts.render as string) === "cpu" ? "cpu" : "gpu") as RenderMode;
+    const numChannels = Math.max(1, parseInt(opts.channels as string) || 1);
     const evalWorkflow = opts.eval as string | undefined;
-    console.log(`[dimsim] Dev mode — scene: ${scene}, port: ${port}${headless ? " (headless)" : ""}`);
+
+    // Build channel list for multi-instance mode
+    const channels = numChannels > 1
+      ? Array.from({ length: numChannels }, (_, i) => `page-${i}`)
+      : undefined;
+
+    console.log(`[dimsim] Dev mode — scene: ${scene}, port: ${port}${headless ? " (headless)" : ""}${channels ? ` (${numChannels} channels)` : ""}`);
     console.log(`[dimsim] Serving from: ${distDir}`);
 
     // LCM bridge is always active in dev mode (unlike eval --headless which disables it)
-    startBridgeServer({ port, distDir, scene, headless });
+    startBridgeServer({ port, distDir, scene, headless, channels });
 
     if (headless) {
-      console.log("[dimsim] Launching headless browser...");
-      const url = `http://localhost:${port}`;
-      await launchHeadless({ url, timeout: 30000, render });
-      await new Promise((r) => setTimeout(r, 3000));
-      console.log("[dimsim] Headless browser ready. LCM bridge active.");
+      if (channels) {
+        // Multi-page mode: open N browser pages in one Chromium instance
+        console.log(`[dimsim] Launching headless browser with ${numChannels} pages...`);
+        const url = `http://localhost:${port}`;
+        await launchMultiPage({ url, numPages: numChannels, timeout: 30000, render });
+        await new Promise((r) => setTimeout(r, 3000));
+        console.log(`[dimsim] ${numChannels} headless pages ready. LCM bridge active.`);
+      } else {
+        console.log("[dimsim] Launching headless browser...");
+        const url = `http://localhost:${port}`;
+        await launchHeadless({ url, timeout: 30000, render });
+        await new Promise((r) => setTimeout(r, 3000));
+        console.log("[dimsim] Headless browser ready. LCM bridge active.");
+      }
     } else {
       console.log(`[dimsim] Open http://localhost:${port} in your browser`);
     }
