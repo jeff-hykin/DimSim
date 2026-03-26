@@ -188,15 +188,13 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       } else {
         // ── CONTROL WebSocket ─────────────────────────────────────────
         socket.onopen = () => {
-          // Enforce single active control uplink to avoid interleaved odom from multiple tabs.
-          if (activeControlClient && activeControlClient !== socket && activeControlClient.readyState === WebSocket.OPEN) {
-            try {
-              activeControlClient.close(1000, "superseded-by-new-control-client");
-            } catch { /* ignore */ }
+          // First control client becomes the active one (receives LCM→WS relay).
+          // Additional clients (eval runner) coexist without kicking the browser.
+          if (!activeControlClient || activeControlClient.readyState !== WebSocket.OPEN) {
+            activeControlClient = socket;
           }
-          activeControlClient = socket;
           controlClients.add(socket);
-          console.log(`[bridge] control WS+ (${controlClients.size}) active=1`);
+          console.log(`[bridge] control WS+ (${controlClients.size})`);
         };
         socket.onerror = () => controlClients.delete(socket);
 
@@ -209,6 +207,15 @@ export async function startBridgeServer(options: BridgeServerOptions) {
         };
 
         socket.onmessage = (event: MessageEvent) => {
+          // Text messages: relay to all other control clients (eval runner ↔ browser)
+          if (typeof event.data === "string") {
+            for (const client of controlClients) {
+              if (client !== socket && client.readyState === WebSocket.OPEN) {
+                try { client.send(event.data); } catch { /* ignore */ }
+              }
+            }
+            return;
+          }
           if (!(event.data instanceof ArrayBuffer) || !lcm) return;
           // Ignore odom uplink from non-active control sockets.
           if (activeControlClient !== socket) return;

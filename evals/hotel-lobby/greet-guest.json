@@ -10,9 +10,6 @@
       "object": "agent",
       "target": "front-desk",
       "thresholdM": 1.5
-    },
-    "llmJudge": {
-      "prompt": "Did the agent navigate to the front desk area and position itself appropriately to greet a guest?"
     }
   }
 }

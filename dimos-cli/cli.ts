@@ -18,6 +18,8 @@ import { startBridgeServer } from "./bridge/server.ts";
 import { launchHeadless, launchMultiPage, type RenderMode } from "./headless/launcher.ts";
 import { runEvals, runEvalsMultiPage, collectWorkflows, toJunitXml, type EvalResult } from "./eval/runner.ts";
 import { getDimsimHome, getDistDir, setup, sceneInstall, sceneList, sceneRemove } from "./setup.ts";
+import { loadSceneIndex, findObject, suggestObjects } from "./eval/scene-index.ts";
+import { buildEval } from "./eval/builder.ts";
 
 // When installed from JSR, import.meta.url is https:// — local paths don't exist.
 const IS_REMOTE = !import.meta.url.startsWith("file:");
@@ -64,6 +66,8 @@ Commands:
   dimsim scene remove <name>     Remove a local scene
   dimsim dev   [options]         Dev server (open browser, optional eval)
   dimsim eval  [options]         Run eval workflows (headless CI)
+  dimsim list objects [options]   List scene objects (eval targets)
+  dimsim build eval [options]    Generate eval from validated target
   dimsim agent [options]         Launch dimos Python agent
 
 Setup:
@@ -78,6 +82,7 @@ Dev:
   --env <name>                   Environment filter
 
 Eval:
+  --connect                      Connect to existing bridge (use with dimos)
   --headless                     Headless Chromium (required for CI)
   --parallel <n>                 N parallel browser pages (default: 1)
   --render gpu|cpu               gpu = Metal/ANGLE, cpu = SwiftShader (default: cpu)
@@ -86,6 +91,19 @@ Eval:
   --output json|junit            Output format (default: json)
   --port <n>                     Bridge port (default: 8090)
   --timeout <ms>                 Engine init timeout (default: auto)
+
+List Objects:
+  --scene <name>                   Scene to inspect (required)
+  --search <term>                  Filter objects by name
+
+Build Eval:
+  --scene <name>                   Scene name (required)
+  --target <object>                Target object name (required, validated)
+  --threshold <m>                  Distance threshold (default: 2.0)
+  --timeout <s>                    Timeout in seconds (default: 60)
+  --task <prompt>                  Agent prompt (default: auto from target)
+  --name <id>                      Eval name (default: slugified target)
+  --env <name>                     Manifest environment (default: scene name)
 
 Agent:
   --nav-only                     Nav stack only (no LLM agent)
@@ -173,6 +191,110 @@ async function main() {
       console.log("  dimsim scene remove <name>");
     }
     Deno.exit(0);
+  }
+
+  // ── List objects ────────────────────────────────────────────────────
+  if (subcommand === "list") {
+    const what = Deno.args[1];
+    if (what === "objects") {
+      const listOpts = parseArgs(Deno.args.slice(2));
+      const sceneName = listOpts.scene as string;
+      if (!sceneName) {
+        console.error("[dimsim] --scene is required. Example: dimsim list objects --scene apt");
+        Deno.exit(1);
+      }
+
+      const distDir = await resolveDistDir();
+      const scenePath = `${distDir}/sims/${sceneName}.json`;
+      try {
+        await Deno.stat(scenePath);
+      } catch {
+        console.error(`[dimsim] Scene "${sceneName}" not found at ${scenePath}`);
+        console.error(`[dimsim] Run 'dimsim scene install ${sceneName}' first.`);
+        Deno.exit(1);
+      }
+
+      const index = loadSceneIndex(scenePath, sceneName);
+      const search = listOpts.search as string | undefined;
+
+      let filtered = index.objects;
+      if (search) {
+        const lower = search.toLowerCase();
+        filtered = index.objects.filter(
+          (o) => o.title.toLowerCase().includes(lower) || o.id.toLowerCase().includes(lower),
+        );
+        console.log(`\nObjects matching "${search}" in scene "${sceneName}" (${filtered.length}):\n`);
+      } else {
+        console.log(`\nObjects in scene "${sceneName}" (${filtered.length} titled assets):\n`);
+      }
+
+      if (filtered.length === 0) {
+        console.log("  (none)");
+      } else {
+        const maxTitle = Math.min(45, Math.max(...filtered.map((o) => o.title.length)));
+        for (const obj of filtered) {
+          const t = obj.title.padEnd(maxTitle);
+          console.log(`  ${t}  (${obj.position.x}, ${obj.position.y}, ${obj.position.z})`);
+        }
+      }
+      console.log();
+      Deno.exit(0);
+    }
+    console.log("Usage: dimsim list objects --scene <name> [--search <term>]");
+    Deno.exit(1);
+  }
+
+  // ── Build eval ─────────────────────────────────────────────────────
+  if (subcommand === "build") {
+    const what = Deno.args[1];
+    if (what === "eval") {
+      const buildOpts = parseArgs(Deno.args.slice(2));
+      const sceneName = buildOpts.scene as string;
+      const target = buildOpts.target as string;
+
+      if (!sceneName || !target) {
+        console.error("[dimsim] --scene and --target are required.");
+        console.error("Example: dimsim build eval --scene apt --target television");
+        Deno.exit(1);
+      }
+
+      const distDir = await resolveDistDir();
+      const scenePath = `${distDir}/sims/${sceneName}.json`;
+      try {
+        await Deno.stat(scenePath);
+      } catch {
+        console.error(`[dimsim] Scene "${sceneName}" not found at ${scenePath}`);
+        console.error(`[dimsim] Run 'dimsim scene install ${sceneName}' first.`);
+        Deno.exit(1);
+      }
+
+      try {
+        const result = buildEval({
+          scenePath,
+          sceneName,
+          target,
+          threshold: buildOpts.threshold ? parseFloat(buildOpts.threshold as string) : undefined,
+          timeout: buildOpts.timeout ? parseInt(buildOpts.timeout as string) : undefined,
+          task: buildOpts.task as string | undefined,
+          name: buildOpts.name as string | undefined,
+          env: buildOpts.env as string | undefined,
+          evalsDir: EVALS_DIR,
+        });
+
+        console.log(`\nCreated eval: ${result.filePath}`);
+        console.log(`  Task:      "${result.task}"`);
+        console.log(`  Target:    ${result.targetTitle} (${result.targetPosition.x}, ${result.targetPosition.y}, ${result.targetPosition.z})`);
+        console.log(`  Threshold: ${result.threshold}m`);
+        console.log(`  Timeout:   ${result.timeout}s`);
+        console.log(`\nRun: dimsim eval --connect --env ${result.env} --workflow ${result.workflowName}\n`);
+      } catch (err: any) {
+        console.error(`[dimsim] ${err.message}`);
+        Deno.exit(1);
+      }
+      Deno.exit(0);
+    }
+    console.log("Usage: dimsim build eval --scene <name> --target <object> [options]");
+    Deno.exit(1);
   }
 
   // ── Dev ─────────────────────────────────────────────────────────────
@@ -271,6 +393,29 @@ async function main() {
 
   // ── Eval ────────────────────────────────────────────────────────────
   if (subcommand === "eval") {
+    const connectMode = opts.connect === true;
+    const outputFormat = (opts.output as string) === "junit" ? "junit" : "json";
+    const manifestPath = resolve(EVALS_DIR, "manifest.json");
+
+    // --connect mode: just run the eval runner against an existing bridge
+    if (connectMode) {
+      const wsUrl = `ws://localhost:${port}`;
+      console.log(`[dimsim] Connecting to existing bridge at ${wsUrl}...`);
+
+      const results = await runEvals({
+        wsUrl,
+        manifestPath,
+        filterEnv: opts.env as string,
+        filterWorkflow: opts.workflow as string,
+        outputFormat: outputFormat as "json" | "junit",
+      });
+
+      const passed = results.filter((r) => r.pass).length;
+      const failed = results.length - passed;
+      console.log(`\n[dimsim] Done: ${passed} passed, ${failed} failed, ${results.length} total`);
+      Deno.exit(failed > 0 ? 1 : 0);
+    }
+
     const distDir = await resolveDistDir();
     const headless = opts.headless === true;
     const scene = (opts.scene as string) || (opts.env as string) || "hotel-lobby";
@@ -278,8 +423,6 @@ async function main() {
     const render = ((opts.render as string) === "gpu" ? "gpu" : "cpu") as RenderMode;
     const defaultTimeout = render === "cpu" ? 120000 : 30000;
     const timeout = parseInt(opts.timeout as string) || defaultTimeout;
-    const outputFormat = (opts.output as string) === "junit" ? "junit" : "json";
-    const manifestPath = resolve(EVALS_DIR, "manifest.json");
 
     if (headless && parallel > 1) {
       const allWorkflows = collectWorkflows(

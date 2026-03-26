@@ -7468,8 +7468,41 @@ if (dimosMode) {
       // Odom: server-side physics publishes odom directly to LCM.
       // Browser no longer needs to publish odom — server is authoritative.
 
-      // Eval harness disabled — focusing on dimos integration.
-      // Re-enable by importing evalHarness.ts when eval workflows are needed.
+      // Eval harness — scores objectDistance rubric when triggered by dimsim eval runner
+      const { EvalHarness } = await import("./dimos/evalHarness.ts");
+      const evalHarness = new EvalHarness({
+        bridge,
+        getSceneState: () => {
+          const enriched = assets.map(a => {
+            const obj = assetsGroup.getObjectByName(`asset:${a.id}`);
+            if (obj) {
+              const bbox = new THREE.Box3().setFromObject(obj);
+              if (!bbox.isEmpty()) {
+                const center = new THREE.Vector3();
+                const size = new THREE.Vector3();
+                bbox.getCenter(center);
+                bbox.getSize(size);
+                return {
+                  ...a,
+                  transform: { x: center.x, y: center.y, z: center.z },
+                  _bbox: { w: size.x, h: size.y, d: size.z },
+                };
+              }
+            }
+            return a;
+          });
+          return { assets: enriched };
+        },
+        getAgentPose: () => {
+          const pos = agent.getPosition?.();
+          if (!pos) return null;
+          const camOffset = 0.3;
+          const cx = pos[0] + Math.sin(_dimosYaw) * camOffset;
+          const cz = pos[2] + Math.cos(_dimosYaw) * camOffset;
+          return { x: cx, y: pos[1], z: cz, yaw: _dimosYaw, pitch: 0 };
+        },
+      });
+      window.__evalHarness = evalHarness;
 
       // Auto-follow dimos agent camera — uses existing agentCameraFollow system
       // so the main camera shows the agent's POV directly (no GPU readback needed)

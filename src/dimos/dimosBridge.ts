@@ -470,6 +470,14 @@ export class DimosBridge {
     }
   }
 
+  /** Send a JSON command on the control WebSocket (used by EvalHarness). */
+  sendCommand(cmd: Record<string, any>): void {
+    const ws = this.wsControl;
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify(cmd));
+    }
+  }
+
   dispose(): void {
     this._stopPublishing();
     if (this.wsControl) { this.wsControl.onclose = null; this.wsControl.close(); }
