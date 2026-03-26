@@ -101,6 +101,10 @@ export class EvalHarness {
       case "stopWorkflow":
         await this._stopWorkflow("runner-requested");
         break;
+      case "loadEnv":
+        // Scene is already loaded in --connect mode, just ack
+        this._send({ type: "envReady", scene: cmd.scene });
+        break;
       case "ping":
         this._send({ type: "pong", ts: Date.now() });
         break;
