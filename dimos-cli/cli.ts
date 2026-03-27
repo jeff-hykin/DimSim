@@ -68,6 +68,7 @@ Commands:
   dimsim scene list              List available + installed scenes
   dimsim scene remove <name>     Remove a local scene
   dimsim dev   [options]         Dev server (open browser, optional eval)
+  dimsim eval list               List installed eval workflows
   dimsim eval create             Interactive eval builder wizard
   dimsim eval  [options]         Run eval workflows (headless CI)
   dimsim list objects [options]   List scene objects (eval targets)
@@ -419,6 +420,49 @@ async function main() {
 
     const status = await proc.status;
     Deno.exit(status.code);
+  }
+
+  // ── Eval list ───────────────────────────────────────────────────────
+  if (subcommand === "eval" && Deno.args[1] === "list") {
+    const evalsDir = EVALS_DIR;
+    const envs: Map<string, string[]> = new Map();
+
+    try {
+      for await (const entry of Deno.readDir(evalsDir)) {
+        if (!entry.isDirectory) continue;
+        const workflows: string[] = [];
+        for await (const file of Deno.readDir(`${evalsDir}/${entry.name}`)) {
+          if (file.name.endsWith(".json") && file.name !== "manifest.json") {
+            workflows.push(file.name.replace(".json", ""));
+          }
+        }
+        if (workflows.length > 0) {
+          workflows.sort();
+          envs.set(entry.name, workflows);
+        }
+      }
+    } catch {
+      console.log("\nNo evals installed. Run 'dimsim setup' or 'dimsim eval create' first.\n");
+      Deno.exit(0);
+    }
+
+    if (envs.size === 0) {
+      console.log("\nNo eval workflows found.\n");
+      Deno.exit(0);
+    }
+
+    const sorted = [...envs.entries()].sort((a, b) => a[0].localeCompare(b[0]));
+    let total = 0;
+    console.log("");
+    for (const [env, workflows] of sorted) {
+      console.log(`  \x1b[1m${env}\x1b[0m \x1b[2m(${workflows.length})\x1b[0m`);
+      for (const w of workflows) {
+        console.log(`    ${w}`);
+        total++;
+      }
+    }
+    console.log(`\n  \x1b[2m${total} workflow(s) across ${envs.size} environment(s)\x1b[0m\n`);
+    Deno.exit(0);
   }
 
   // ── Eval create (interactive wizard) ─────────────────────────────────
