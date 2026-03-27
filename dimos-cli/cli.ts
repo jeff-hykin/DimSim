@@ -9,6 +9,7 @@
  *   dimsim scene list                                       List scenes
  *   dimsim scene remove <name>                              Remove a scene
  *   dimsim dev   [--scene <name>] [--port <n>]              Dev server + browser
+ *   dimsim eval create                                      Interactive eval wizard
  *   dimsim eval  [--headless] [--parallel N] [--render gpu] Headless CI evals
  *   dimsim agent [--nav-only]                               dimos Python agent
  */
@@ -67,6 +68,7 @@ Commands:
   dimsim scene list              List available + installed scenes
   dimsim scene remove <name>     Remove a local scene
   dimsim dev   [options]         Dev server (open browser, optional eval)
+  dimsim eval create             Interactive eval builder wizard
   dimsim eval  [options]         Run eval workflows (headless CI)
   dimsim list objects [options]   List scene objects (eval targets)
   dimsim build eval [options]    Generate eval from validated target
@@ -417,6 +419,114 @@ async function main() {
 
     const status = await proc.status;
     Deno.exit(status.code);
+  }
+
+  // ── Eval create (interactive wizard) ─────────────────────────────────
+  if (subcommand === "eval" && Deno.args[1] === "create") {
+    const distDir = await resolveDistDir();
+    const simsDir = `${distDir}/sims`;
+
+    // 1. Pick scene from installed scenes
+    const installed: string[] = [];
+    try {
+      for await (const entry of Deno.readDir(simsDir)) {
+        if (entry.name.endsWith(".json") && entry.name !== "manifest.json") {
+          installed.push(entry.name.replace(".json", ""));
+        }
+      }
+    } catch { /* no sims */ }
+
+    if (installed.length === 0) {
+      console.error("[dimsim] No scenes installed. Run 'dimsim scene install <name>' first.");
+      Deno.exit(1);
+    }
+
+    console.log("\n  Available scenes:");
+    installed.forEach((s, i) => console.log(`    ${i + 1}. ${s}`));
+    const sceneInput = prompt(`\n  Scene [${installed[0]}]:`) || installed[0];
+    const sceneName = installed.includes(sceneInput)
+      ? sceneInput
+      : installed[parseInt(sceneInput) - 1] || sceneInput;
+
+    const scenePath = `${simsDir}/${sceneName}.json`;
+    try {
+      await Deno.stat(scenePath);
+    } catch {
+      console.error(`[dimsim] Scene "${sceneName}" not found.`);
+      Deno.exit(1);
+    }
+
+    // 2. Show objects in scene
+    const index = loadSceneIndex(scenePath, sceneName);
+    console.log(`\n  Objects in "${sceneName}" (${index.objects.length}):`);
+    const sample = index.objects.slice(0, 20);
+    for (const obj of sample) {
+      console.log(`    ${obj.title}`);
+    }
+    if (index.objects.length > 20) {
+      console.log(`    ... and ${index.objects.length - 20} more (use 'dimsim list objects --scene ${sceneName}' to see all)`);
+    }
+
+    // 3. Pick target
+    const target = prompt("\n  Target object:");
+    if (!target) {
+      console.error("[dimsim] Target is required.");
+      Deno.exit(1);
+    }
+
+    // Validate target exists
+    const match = findObject(target, index);
+    if (!match) {
+      const suggestions = suggestObjects(target, index);
+      console.error(`[dimsim] No object matching "${target}" in scene.`);
+      if (suggestions.length > 0) {
+        console.error(`  Similar: ${suggestions.join(", ")}`);
+      }
+      Deno.exit(1);
+    }
+    console.log(`  → Matched: "${match.title}" at (${match.position.x}, ${match.position.y}, ${match.position.z})`);
+
+    // 4. Task prompt
+    const defaultTask = `Go to the ${match.title}`;
+    const task = prompt(`  Task [${defaultTask}]:`) || defaultTask;
+
+    // 5. Eval name
+    const defaultName = target.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const name = prompt(`  Eval name [${defaultName}]:`) || defaultName;
+
+    // 6. Threshold
+    const thresholdStr = prompt("  Distance threshold in meters [2.0]:");
+    const threshold = thresholdStr ? parseFloat(thresholdStr) : 2.0;
+
+    // 7. Timeout
+    const timeoutStr = prompt("  Timeout in seconds [60]:");
+    const timeout = timeoutStr ? parseInt(timeoutStr) : 60;
+
+    // 8. Environment (manifest grouping)
+    const env = prompt(`  Environment [${sceneName}]:`) || sceneName;
+
+    try {
+      const result = buildEval({
+        scenePath,
+        sceneName,
+        target,
+        threshold,
+        timeout,
+        task,
+        name,
+        env,
+        evalsDir: EVALS_DIR,
+      });
+
+      console.log(`\n  ✓ Created: ${result.filePath}`);
+      console.log(`\n  Run it:`);
+      console.log(`    dimsim eval --connect --env ${result.env} --workflow ${result.workflowName}`);
+      console.log(`    dimsim eval --headless --env ${result.env} --workflow ${result.workflowName}\n`);
+    } catch (err: unknown) {
+      console.error(`[dimsim] ${(err as Error).message}`);
+      Deno.exit(1);
+    }
+    Deno.exit(0);
   }
 
   // ── Eval ────────────────────────────────────────────────────────────

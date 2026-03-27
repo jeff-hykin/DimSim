@@ -27,10 +27,15 @@ tar -czf "dimsim-core-v${VERSION}.tar.gz" \
 echo "Packaging apt scene..."
 gzip -c dist/sims/apt.json > "scene-apt-v${VERSION}.tar.gz"
 
+echo "Packaging evals..."
+tar -czf "dimsim-evals-v${VERSION}.tar.gz" \
+  -C evals \
+  .
+
 echo ""
 echo "Release artifacts:"
-ls -lh "dimsim-core-v${VERSION}.tar.gz" "scene-apt-v${VERSION}.tar.gz"
+ls -lh "dimsim-core-v${VERSION}.tar.gz" "scene-apt-v${VERSION}.tar.gz" "dimsim-evals-v${VERSION}.tar.gz"
 
 echo ""
 echo "Upload to GitHub Release:"
-echo "  gh release create v${VERSION} dimsim-core-v${VERSION}.tar.gz scene-apt-v${VERSION}.tar.gz"
+echo "  gh release create v${VERSION} dimsim-core-v${VERSION}.tar.gz scene-apt-v${VERSION}.tar.gz dimsim-evals-v${VERSION}.tar.gz"

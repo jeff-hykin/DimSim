@@ -2,9 +2,12 @@
   "version": "5",
   "specifiers": {
     "jsr:@antim/dimsim@*": "0.1.3",
+    "jsr:@antim/dimsim@0.1.28": "0.1.28",
+    "jsr:@antim/dimsim@0.1.29": "0.1.29",
     "jsr:@dimos/lcm@*": "0.2.0",
     "jsr:@dimos/lcm@0.2.0": "0.2.0",
     "jsr:@dimos/msgs@0.1.4": "0.1.4",
+    "jsr:@dimos/msgs@~0.1.4": "0.1.4",
     "jsr:@std/cli@^1.0.28": "1.0.28",
     "jsr:@std/encoding@^1.0.10": "1.0.10",
     "jsr:@std/fmt@^1.0.9": "1.0.9",
@@ -22,6 +25,22 @@
     "@antim/dimsim@0.1.3": {
       "integrity": "b145e83a4545ba03004ccfcd0c14afad3cb9af3258f8174b0f0a8cc64b9949da",
       "dependencies": [
+        "jsr:@std/http",
+        "jsr:@std/path@1"
+      ]
+    },
+    "@antim/dimsim@0.1.28": {
+      "integrity": "ad194c3c478a403d31b9320df6fe14d52783a26fa6c8c25a6ea57863926513a4",
+      "dependencies": [
+        "jsr:@dimos/msgs@~0.1.4",
+        "jsr:@std/http",
+        "jsr:@std/path@1"
+      ]
+    },
+    "@antim/dimsim@0.1.29": {
+      "integrity": "b8d6c2edc8bf82c6b83ac01fa8cc24f16332aadbf8b1e46733bcdf9c7d9e77b6",
+      "dependencies": [
+        "jsr:@dimos/msgs@~0.1.4",
         "jsr:@std/http",
         "jsr:@std/path@1"
       ]

@@ -35,6 +35,7 @@ interface SceneEntry {
 interface Registry {
   version: string;
   coreUrl: string;
+  evalsUrl?: string;
   scenes: Record<string, SceneEntry>;
 }
 
@@ -158,11 +159,13 @@ export async function setup(localArchive?: string): Promise<void> {
   console.log(`[dimsim] Setting up in ${home}`);
   await Deno.mkdir(home, { recursive: true });
 
+  let registry: Registry | null = null;
+
   if (localArchive) {
     console.log(`[dimsim] Extracting core from local archive: ${localArchive}`);
     await extractTarGz(localArchive, distDir);
   } else {
-    const registry = await fetchRegistry();
+    registry = await fetchRegistry();
     const local = await readVersionInfo();
 
     if (local.core === registry.version) {
@@ -192,6 +195,28 @@ export async function setup(localArchive?: string): Promise<void> {
     await Deno.stat(manifestPath);
   } catch {
     await Deno.writeTextFile(manifestPath, JSON.stringify([], null, 2));
+  }
+
+  // Install evals to ~/.dimsim/evals/
+  if (registry?.evalsUrl) {
+    const evalsDir = `${home}/evals`;
+    const evalsVerFile = `${home}/evals-version`;
+    let installedEvalsVer: string | null = null;
+    try {
+      installedEvalsVer = (await Deno.readTextFile(evalsVerFile)).trim();
+    } catch { /* not installed */ }
+
+    if (installedEvalsVer === registry.version) {
+      console.log(`[dimsim] Evals already up-to-date (v${registry.version})`);
+    } else {
+      const tmpFile = `${home}/evals-download.tar.gz`;
+      console.log(`[dimsim] Downloading evals...`);
+      await download(registry.evalsUrl, tmpFile);
+      console.log(`[dimsim] Extracting evals...`);
+      await extractTarGz(tmpFile, evalsDir);
+      await Deno.remove(tmpFile);
+      await Deno.writeTextFile(evalsVerFile, registry.version);
+    }
   }
 
   console.log(`[dimsim] Core setup complete.`);

@@ -1,6 +1,7 @@
 {
   "version": "5",
   "specifiers": {
+    "jsr:@antim/dimsim@*": "0.1.27",
     "jsr:@dimos/msgs@~0.1.4": "0.1.4",
     "jsr:@std/cli@^1.0.27": "1.0.27",
     "jsr:@std/encoding@^1.0.10": "1.0.10",
@@ -19,6 +20,16 @@
     "npm:playwright@^1.58.0": "1.58.2"
   },
   "jsr": {
+    "@antim/dimsim@0.1.27": {
+      "integrity": "fc7f8f3aaeb0e06b06aaf35e157308f656be344db434a10bb573343c43a4bbbb",
+      "dependencies": [
+        "jsr:@dimos/msgs",
+        "jsr:@std/http",
+        "jsr:@std/path@1",
+        "npm:@dimforge/rapier3d-compat",
+        "npm:playwright@^1.58.0"
+      ]
+    },
     "@dimos/msgs@0.1.4": {
       "integrity": "564bc30b4bc41a562c296c257a15055283ca0cbd66d0627991ede5295832d0c4"
     },

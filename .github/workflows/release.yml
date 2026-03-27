@@ -37,6 +37,7 @@ jobs:
              '{
                version: $v,
                coreUrl: "\($base)/dimsim-core-v\($v).tar.gz",
+               evalsUrl: "\($base)/dimsim-evals-v\($v).tar.gz",
                scenes: (.scenes | to_entries | map({
                  key: .key,
                  value: (.value + { url: "\($base)/scene-\(.key)-v\($v).tar.gz" })
@@ -74,6 +75,7 @@ jobs:
             registry.json \
             "dimsim-core-v${VERSION}.tar.gz" \
             "scene-apt-v${VERSION}.tar.gz" \
+            "dimsim-evals-v${VERSION}.tar.gz" \
             dimsim-linux-x64 \
             dimsim-darwin-arm64 \
             dimsim-darwin-x64 \
