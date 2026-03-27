@@ -21,8 +21,10 @@ import { getDimsimHome, getDistDir, setup, sceneInstall, sceneList, sceneRemove 
 import { loadSceneIndex, findObject, suggestObjects } from "./eval/scene-index.ts";
 import { buildEval } from "./eval/builder.ts";
 
-// When installed from JSR, import.meta.url is https:// — local paths don't exist.
-const IS_REMOTE = !import.meta.url.startsWith("file:");
+// Detect compiled binary: Deno.execPath() won't contain "deno" when compiled.
+// When compiled or installed from JSR, local source paths don't exist.
+const IS_COMPILED = !Deno.execPath().toLowerCase().includes("deno");
+const IS_REMOTE = IS_COMPILED || !import.meta.url.startsWith("file:");
 
 const CLI_DIR = IS_REMOTE ? null : dirname(fromFileUrl(import.meta.url));
 const PROJECT_DIR = CLI_DIR ? resolve(CLI_DIR, "..") : null;

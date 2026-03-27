@@ -1,5 +1,5 @@
 /**
- * DimSim Setup — Downloads core assets and scenes from S3.
+ * DimSim Setup — Downloads core assets and scenes from GitHub Releases.
  *
  * Local data stored at ~/.dimsim/ (override with DIMSIM_HOME env var).
  *
@@ -10,8 +10,8 @@
  *   └── evals/          (eval workflows)
  */
 
-const REGISTRY_URL =
-  "https://dimsim-assets.s3.amazonaws.com/scenes.json";
+const GITHUB_REPO = "Antim-Labs/DimSim";
+const RELEASES_API = `https://api.github.com/repos/${GITHUB_REPO}/releases/latest`;
 
 export function getDimsimHome(): string {
   return (
@@ -42,9 +42,24 @@ async function fetchRegistry(localPath?: string): Promise<Registry> {
   if (localPath) {
     return JSON.parse(await Deno.readTextFile(localPath));
   }
-  const resp = await fetch(REGISTRY_URL);
-  if (!resp.ok) throw new Error(`Failed to fetch registry: ${resp.status}`);
-  return resp.json();
+
+  // Fetch latest release from GitHub API, find registry.json asset
+  const resp = await fetch(RELEASES_API, {
+    headers: { Accept: "application/vnd.github.v3+json" },
+  });
+  if (!resp.ok) throw new Error(`Failed to fetch latest release: ${resp.status}`);
+  const release = await resp.json();
+
+  const asset = release.assets?.find(
+    (a: { name: string }) => a.name === "registry.json",
+  );
+  if (!asset) {
+    throw new Error("registry.json not found in latest GitHub release");
+  }
+
+  const regResp = await fetch(asset.browser_download_url);
+  if (!regResp.ok) throw new Error(`Failed to download registry: ${regResp.status}`);
+  return regResp.json();
 }
 
 // ── Download with progress ──────────────────────────────────────────────

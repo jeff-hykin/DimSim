@@ -26,11 +26,14 @@ jobs:
       - name: Set version
         run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
 
-      # Generate scenes.json from template + tag version
-      - name: Generate scenes.json
+      # Generate registry.json with GitHub Release download URLs
+      - name: Generate registry.json
         run: |
+          REPO="${{ github.repository }}"
+          TAG="${GITHUB_REF_NAME}"
+          BASE="https://github.com/${REPO}/releases/download/${TAG}"
           jq --arg v "$VERSION" \
-             --arg base "https://dimsim-assets.s3.amazonaws.com/v$VERSION" \
+             --arg base "$BASE" \
              '{
                version: $v,
                coreUrl: "\($base)/dimsim-core-v\($v).tar.gz",
@@ -38,9 +41,9 @@ jobs:
                  key: .key,
                  value: (.value + { url: "\($base)/scene-\(.key)-v\($v).tar.gz" })
                }) | from_entries)
-             }' scenes.template.json > scenes.json
-          echo "Generated scenes.json:"
-          cat scenes.json
+             }' scenes.template.json > registry.json
+          echo "Generated registry.json:"
+          cat registry.json
 
       # Build frontend
       - name: Install npm deps
@@ -49,28 +52,31 @@ jobs:
       - name: Build frontend
         run: npm run build
 
-      # Package release artifacts
+      # Package release artifacts (core + scenes)
       - name: Package release
         run: bash scripts/package-release.sh "$VERSION"
 
-      # Create GitHub Release with tarballs
+      # Compile CLI binary for each platform
+      - name: Compile binaries
+        run: |
+          cd dimos-cli
+          deno compile --allow-all --unstable-net --target x86_64-unknown-linux-gnu -o ../dimsim-linux-x64 cli.ts
+          deno compile --allow-all --unstable-net --target aarch64-apple-darwin -o ../dimsim-darwin-arm64 cli.ts
+          deno compile --allow-all --unstable-net --target x86_64-apple-darwin -o ../dimsim-darwin-x64 cli.ts
+          cd ..
+          ls -lh dimsim-linux-x64 dimsim-darwin-arm64 dimsim-darwin-x64
+
+      # Create GitHub Release with all artifacts
       - name: Create GitHub Release
         run: |
           gh release create "$GITHUB_REF_NAME" \
+            registry.json \
             "dimsim-core-v${VERSION}.tar.gz" \
             "scene-apt-v${VERSION}.tar.gz" \
+            dimsim-linux-x64 \
+            dimsim-darwin-arm64 \
+            dimsim-darwin-x64 \
             --title "DimSim ${GITHUB_REF_NAME}" \
             --generate-notes
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      # Upload assets to S3
-      - name: Upload to S3
-        run: |
-          aws s3 cp "dimsim-core-v${VERSION}.tar.gz" "s3://dimsim-assets/${GITHUB_REF_NAME}/"
-          aws s3 cp "scene-apt-v${VERSION}.tar.gz" "s3://dimsim-assets/${GITHUB_REF_NAME}/"
-          aws s3 cp scenes.json s3://dimsim-assets/scenes.json
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: us-east-1
