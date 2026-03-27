@@ -145,7 +145,7 @@ export async function launchHeadless(options: LaunchOptions): Promise<HeadlessIn
 // ── Multi-page launcher (single browser, N tabs) ────────────────────────
 
 export async function launchMultiPage(options: MultiPageOptions): Promise<MultiPageInstance> {
-  const { url, numPages, timeout = 30000, render = "cpu" } = options;
+  const { url, numPages, timeout = 60000, render = "cpu" } = options;
   const args = render === "gpu" ? GPU_ARGS : CPU_ARGS;
   const viewport = getViewport(render);
 
@@ -175,8 +175,8 @@ export async function launchMultiPage(options: MultiPageOptions): Promise<MultiP
 
     pages.push(page);
 
-    // Stagger launches to avoid GPU contention during scene load
-    if (i < numPages - 1) await new Promise((r) => setTimeout(r, 2000));
+    // Stagger launches to avoid GPU/CPU contention during scene load
+    if (i < numPages - 1) await new Promise((r) => setTimeout(r, 3000));
   }
 
   console.log(`[headless] All ${numPages} pages ready.`);
