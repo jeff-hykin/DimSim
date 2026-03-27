@@ -145,14 +145,23 @@ async function main() {
   }
 
   if (subcommand === "--version" || subcommand === "version") {
-    // deno.json is importable as JSON both locally and from JSR cache
-    const metaUrl = new URL("./deno.json", import.meta.url);
-    try {
-      const resp = await fetch(metaUrl);
-      const meta = await resp.json();
-      console.log(meta.version);
-    } catch {
-      console.log("unknown");
+    if (IS_COMPILED) {
+      // Version is read from the embedded deno.json at compile time
+      try {
+        const text = await Deno.readTextFile(new URL("./deno.json", import.meta.url));
+        console.log(JSON.parse(text).version);
+      } catch {
+        console.log("0.1.31");  // fallback — updated at release time
+      }
+    } else {
+      const metaUrl = new URL("./deno.json", import.meta.url);
+      try {
+        const resp = await fetch(metaUrl);
+        const meta = await resp.json();
+        console.log(meta.version);
+      } catch {
+        console.log("unknown");
+      }
     }
     Deno.exit(0);
   }

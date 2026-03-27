@@ -60,9 +60,10 @@ jobs:
       - name: Compile binaries
         run: |
           cd dimos-cli
-          deno compile --allow-all --unstable-net --target x86_64-unknown-linux-gnu -o ../dimsim-linux-x64 cli.ts
-          deno compile --allow-all --unstable-net --target aarch64-apple-darwin -o ../dimsim-darwin-arm64 cli.ts
-          deno compile --allow-all --unstable-net --target x86_64-apple-darwin -o ../dimsim-darwin-x64 cli.ts
+          COMPILE="deno compile --allow-all --unstable-net --include deno.json"
+          $COMPILE --target x86_64-unknown-linux-gnu -o ../dimsim-linux-x64 cli.ts
+          $COMPILE --target aarch64-apple-darwin -o ../dimsim-darwin-arm64 cli.ts
+          $COMPILE --target x86_64-apple-darwin -o ../dimsim-darwin-x64 cli.ts
           cd ..
           ls -lh dimsim-linux-x64 dimsim-darwin-arm64 dimsim-darwin-x64
 
