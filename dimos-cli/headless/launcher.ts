@@ -145,11 +145,11 @@ export async function launchHeadless(options: LaunchOptions): Promise<HeadlessIn
 // ── Multi-page launcher (single browser, N tabs) ────────────────────────
 
 export async function launchMultiPage(options: MultiPageOptions): Promise<MultiPageInstance> {
-  const { url, numPages, timeout = 60000, render = "cpu" } = options;
+  const { url, numPages, timeout = 120_000, render = "cpu" } = options;
   const args = render === "gpu" ? GPU_ARGS : CPU_ARGS;
   const viewport = getViewport(render);
 
-  console.log(`[headless] Multi-page: ${numPages} pages, render=${render}`);
+  console.log(`[headless] Multi-page: ${numPages} pages, render=${render}, timeout=${timeout}ms`);
 
   const browser = await chromium.launch({ headless: false, channel: LAUNCH_CHANNEL, args });
 
@@ -161,7 +161,9 @@ export async function launchMultiPage(options: MultiPageOptions): Promise<MultiP
     channels.push(channel);
 
     const context = await browser.newContext({ viewport, deviceScaleFactor: 1 });
+    context.setDefaultTimeout(timeout);
     const page = await context.newPage();
+    page.setDefaultTimeout(timeout);
     hookPageConsole(page, `[page-${i}]`);
 
     const pageUrl = `${url}?channel=${channel}`;
@@ -176,7 +178,7 @@ export async function launchMultiPage(options: MultiPageOptions): Promise<MultiP
     pages.push(page);
 
     // Stagger launches to avoid GPU/CPU contention during scene load
-    if (i < numPages - 1) await new Promise((r) => setTimeout(r, 3000));
+    if (i < numPages - 1) await new Promise((r) => setTimeout(r, 5000));
   }
 
   console.log(`[headless] All ${numPages} pages ready.`);
