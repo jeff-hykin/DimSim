@@ -124,7 +124,7 @@ export async function launchHeadless(options: LaunchOptions): Promise<HeadlessIn
   const page = await context.newPage();
   hookPageConsole(page, "[browser]");
 
-  await page.goto(url, { waitUntil: "networkidle" });
+  await page.goto(url, { waitUntil: "load", timeout });
   await page.waitForFunction(
     () => typeof (window as unknown as Record<string, unknown>).__dimosBridge !== "undefined",
     { timeout },
@@ -166,7 +166,7 @@ export async function launchMultiPage(options: MultiPageOptions): Promise<MultiP
 
     const pageUrl = `${url}?channel=${channel}`;
     console.log(`[headless] Page ${i}: loading...`);
-    await page.goto(pageUrl, { waitUntil: "networkidle" });
+    await page.goto(pageUrl, { waitUntil: "load", timeout });
     await page.waitForFunction(
       () => typeof (window as unknown as Record<string, unknown>).__dimosBridge !== "undefined",
       { timeout },
