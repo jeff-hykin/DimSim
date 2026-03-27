@@ -423,10 +423,20 @@ async function main() {
 
   // ── Eval create (interactive wizard) ─────────────────────────────────
   if (subcommand === "eval" && Deno.args[1] === "create") {
+    // ANSI helpers
+    const c = {
+      bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
+      cyan: (s: string) => `\x1b[36m${s}\x1b[0m`,
+      green: (s: string) => `\x1b[32m${s}\x1b[0m`,
+      yellow: (s: string) => `\x1b[33m${s}\x1b[0m`,
+      red: (s: string) => `\x1b[31m${s}\x1b[0m`,
+      dim: (s: string) => `\x1b[2m${s}\x1b[0m`,
+    };
+
     const distDir = await resolveDistDir();
     const simsDir = `${distDir}/sims`;
 
-    // 1. Pick scene from installed scenes
+    // ── 1. Pick scene ──────────────────────────────────────────────────
     const installed: string[] = [];
     try {
       for await (const entry of Deno.readDir(simsDir)) {
@@ -435,97 +445,179 @@ async function main() {
         }
       }
     } catch { /* no sims */ }
+    installed.sort();
 
     if (installed.length === 0) {
-      console.error("[dimsim] No scenes installed. Run 'dimsim scene install <name>' first.");
+      console.error(c.red("No scenes installed. Run 'dimsim scene install <name>' first."));
       Deno.exit(1);
     }
 
-    console.log("\n  Available scenes:");
-    installed.forEach((s, i) => console.log(`    ${i + 1}. ${s}`));
-    const sceneInput = prompt(`\n  Scene [${installed[0]}]:`) || installed[0];
-    const sceneName = installed.includes(sceneInput)
-      ? sceneInput
-      : installed[parseInt(sceneInput) - 1] || sceneInput;
+    console.log(`\n${c.bold("  Create Eval Workflow")}\n`);
+    console.log(c.cyan("  Installed scenes:"));
+    installed.forEach((s, i) => console.log(`    ${c.dim(`${i + 1}.`)} ${s}`));
 
-    const scenePath = `${simsDir}/${sceneName}.json`;
-    try {
-      await Deno.stat(scenePath);
-    } catch {
-      console.error(`[dimsim] Scene "${sceneName}" not found.`);
-      Deno.exit(1);
-    }
-
-    // 2. Show objects in scene
-    const index = loadSceneIndex(scenePath, sceneName);
-    console.log(`\n  Objects in "${sceneName}" (${index.objects.length}):`);
-    const sample = index.objects.slice(0, 20);
-    for (const obj of sample) {
-      console.log(`    ${obj.title}`);
-    }
-    if (index.objects.length > 20) {
-      console.log(`    ... and ${index.objects.length - 20} more (use 'dimsim list objects --scene ${sceneName}' to see all)`);
-    }
-
-    // 3. Pick target
-    const target = prompt("\n  Target object:");
-    if (!target) {
-      console.error("[dimsim] Target is required.");
-      Deno.exit(1);
-    }
-
-    // Validate target exists
-    const match = findObject(target, index);
-    if (!match) {
-      const suggestions = suggestObjects(target, index);
-      console.error(`[dimsim] No object matching "${target}" in scene.`);
-      if (suggestions.length > 0) {
-        console.error(`  Similar: ${suggestions.join(", ")}`);
+    let sceneName = "";
+    let scenePath = "";
+    while (true) {
+      const input = prompt(`\n  ${c.cyan("Scene")} ${c.dim(`[${installed[0]}]`)}:`) || installed[0];
+      const resolved = installed.includes(input)
+        ? input
+        : installed[parseInt(input) - 1];
+      if (resolved) {
+        sceneName = resolved;
+        scenePath = `${simsDir}/${sceneName}.json`;
+        try {
+          await Deno.stat(scenePath);
+          console.log(`  ${c.green("→")} ${sceneName}`);
+          break;
+        } catch { /* fall through */ }
       }
-      Deno.exit(1);
+      console.log(c.yellow(`  "${input}" not found. Pick a number or name from the list above.`));
     }
-    console.log(`  → Matched: "${match.title}" at (${match.position.x}, ${match.position.y}, ${match.position.z})`);
 
-    // 4. Task prompt
-    const defaultTask = `Go to the ${match.title}`;
-    const task = prompt(`  Task [${defaultTask}]:`) || defaultTask;
+    // ── 2. Pick rubric ─────────────────────────────────────────────────
+    const rubricChoices = [
+      { key: "objectDistance", label: "objectDistance", desc: "agent must reach a target object" },
+      { key: "llmJudge", label: "llmJudge", desc: "VLM judges success from screenshots" },
+      { key: "groundTruth", label: "groundTruth", desc: "check spatial ground truth conditions" },
+    ];
 
-    // 5. Eval name
-    const defaultName = target.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
-    const name = prompt(`  Eval name [${defaultName}]:`) || defaultName;
+    console.log(`\n${c.cyan("  Rubric types:")}`);
+    rubricChoices.forEach((r, i) =>
+      console.log(`    ${c.dim(`${i + 1}.`)} ${c.bold(r.label)} ${c.dim(`— ${r.desc}`)}`)
+    );
 
-    // 6. Threshold
-    const thresholdStr = prompt("  Distance threshold in meters [2.0]:");
-    const threshold = thresholdStr ? parseFloat(thresholdStr) : 2.0;
-
-    // 7. Timeout
-    const timeoutStr = prompt("  Timeout in seconds [60]:");
-    const timeout = timeoutStr ? parseInt(timeoutStr) : 60;
-
-    // 8. Environment (manifest grouping)
-    const env = prompt(`  Environment [${sceneName}]:`) || sceneName;
-
-    try {
-      const result = buildEval({
-        scenePath,
-        sceneName,
-        target,
-        threshold,
-        timeout,
-        task,
-        name,
-        env,
-        evalsDir: EVALS_DIR,
-      });
-
-      console.log(`\n  ✓ Created: ${result.filePath}`);
-      console.log(`\n  Run it:`);
-      console.log(`    dimsim eval --connect --env ${result.env} --workflow ${result.workflowName}`);
-      console.log(`    dimsim eval --headless --env ${result.env} --workflow ${result.workflowName}\n`);
-    } catch (err: unknown) {
-      console.error(`[dimsim] ${(err as Error).message}`);
-      Deno.exit(1);
+    let rubric = "";
+    while (true) {
+      const input = prompt(`\n  ${c.cyan("Rubric")} ${c.dim("[1]")}:`) || "1";
+      const byNum = rubricChoices[parseInt(input) - 1];
+      const byName = rubricChoices.find((r) => r.key === input);
+      const match = byNum || byName;
+      if (match) {
+        rubric = match.key;
+        console.log(`  ${c.green("→")} ${match.label}`);
+        break;
+      }
+      console.log(c.yellow(`  Invalid choice. Enter 1-3 or a rubric name.`));
     }
+
+    // ── 3. Pick target object (objectDistance needs it) ─────────────────
+    const needsTarget = rubric === "objectDistance";
+    const index = loadSceneIndex(scenePath, sceneName);
+    let target = "";
+    let matchedObj: ReturnType<typeof findObject> = null;
+
+    if (needsTarget) {
+      console.log(`\n${c.cyan(`  Objects in "${sceneName}"`)} ${c.dim(`(${index.objects.length})`)}:`);
+      const sample = index.objects.slice(0, 20);
+      for (const obj of sample) {
+        console.log(`    ${obj.title}`);
+      }
+      if (index.objects.length > 20) {
+        console.log(c.dim(`    ... and ${index.objects.length - 20} more (dimsim list objects --scene ${sceneName})`));
+      }
+
+      while (true) {
+        const input = prompt(`\n  ${c.cyan("Target object")}:`);
+        if (!input) {
+          console.log(c.yellow("  Target is required for objectDistance rubric."));
+          continue;
+        }
+        matchedObj = findObject(input, index);
+        if (matchedObj) {
+          target = input;
+          console.log(`  ${c.green("→")} "${matchedObj.title}" at (${matchedObj.position.x}, ${matchedObj.position.y}, ${matchedObj.position.z})`);
+          break;
+        }
+        const suggestions = suggestObjects(input, index);
+        if (suggestions.length > 0) {
+          console.log(c.yellow(`  No match for "${input}". Similar: ${suggestions.join(", ")}`));
+        } else {
+          console.log(c.yellow(`  No match for "${input}". Try 'dimsim list objects --scene ${sceneName}'.`));
+        }
+      }
+    }
+
+    // ── 4. Task prompt ─────────────────────────────────────────────────
+    const defaultTask = needsTarget && matchedObj
+      ? `Go to the ${matchedObj.title}`
+      : "";
+    let task = "";
+    while (true) {
+      const suffix = defaultTask ? ` ${c.dim(`[${defaultTask}]`)}` : "";
+      const input = prompt(`\n  ${c.cyan("Task prompt")}${suffix}:`) || defaultTask;
+      if (input) {
+        task = input;
+        break;
+      }
+      console.log(c.yellow("  Task prompt is required."));
+    }
+
+    // ── 5. Rubric-specific config ──────────────────────────────────────
+    let threshold = 2.0;
+    let llmPrompt = "";
+
+    if (rubric === "objectDistance") {
+      while (true) {
+        const input = prompt(`  ${c.cyan("Distance threshold")} ${c.dim("[2.0m]")}:`) || "2.0";
+        const val = parseFloat(input);
+        if (!isNaN(val) && val > 0) {
+          threshold = val;
+          break;
+        }
+        console.log(c.yellow("  Enter a positive number (meters)."));
+      }
+    } else if (rubric === "llmJudge") {
+      const defaultJudge = `Did the agent successfully complete: ${task}?`;
+      llmPrompt = prompt(`  ${c.cyan("LLM judge prompt")} ${c.dim(`[${defaultJudge}]`)}:`) || defaultJudge;
+    }
+
+    // ── 6. Eval name ───────────────────────────────────────────────────
+    const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+    const defaultName = target ? slug(target) : slug(task.slice(0, 40));
+    const name = prompt(`  ${c.cyan("Eval name")} ${c.dim(`[${defaultName}]`)}:`) || defaultName;
+
+    // ── 7. Timeout ─────────────────────────────────────────────────────
+    let timeout = 60;
+    while (true) {
+      const input = prompt(`  ${c.cyan("Timeout")} ${c.dim("[60s]")}:`) || "60";
+      const val = parseInt(input);
+      if (!isNaN(val) && val > 0) {
+        timeout = val;
+        break;
+      }
+      console.log(c.yellow("  Enter a positive number (seconds)."));
+    }
+
+    // ── Build & write ──────────────────────────────────────────────────
+    const successCriteria: Record<string, unknown> = {};
+    if (rubric === "objectDistance") {
+      successCriteria.objectDistance = { object: "agent", target, thresholdM: threshold };
+    } else if (rubric === "llmJudge") {
+      successCriteria.llmJudge = { prompt: llmPrompt };
+    } else if (rubric === "groundTruth") {
+      successCriteria.groundTruth = {};
+    }
+
+    const env = sceneName;
+    const workflow = {
+      name,
+      environment: env,
+      task,
+      startPose: { x: 0, y: 0.5, z: 3, yaw: 0 },
+      timeoutSec: timeout,
+      successCriteria,
+    };
+
+    const envDir = `${EVALS_DIR}/${env}`;
+    try { Deno.mkdirSync(envDir, { recursive: true }); } catch { /* exists */ }
+    const filePath = `${envDir}/${name}.json`;
+    Deno.writeTextFileSync(filePath, JSON.stringify(workflow, null, 2) + "\n");
+
+    console.log(`\n  ${c.green("Created:")} ${filePath}`);
+    console.log(`\n  ${c.cyan("Run it:")}`);
+    console.log(`    dimsim eval --connect --env ${env} --workflow ${name}`);
+    console.log(`    dimsim eval --headless --env ${env} --workflow ${name}\n`);
     Deno.exit(0);
   }
 
