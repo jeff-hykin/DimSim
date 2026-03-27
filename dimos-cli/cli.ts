@@ -323,7 +323,7 @@ async function main() {
         // Multi-page mode: open N browser pages in one Chromium instance
         console.log(`[dimsim] Launching headless browser with ${numChannels} pages...`);
         const url = `http://localhost:${port}`;
-        await launchMultiPage({ url, numPages: numChannels, render });
+        await launchMultiPage({ url, numPages: numChannels, render, timeout: 60000 });
         await new Promise((r) => setTimeout(r, 3000));
         console.log(`[dimsim] ${numChannels} headless pages ready. LCM bridge active.`);
       } else {
