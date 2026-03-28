@@ -12,7 +12,7 @@ ip route add 224.0.0.0/4 dev lo 2>/dev/null || true
 echo "Starting DimSim bridge server..."
 cd /app/DimSim
 deno run --allow-all --unstable-net \
-  dimos-cli/cli.ts dev --scene hotel-lobby --port 8090 --headless --render cpu \
+  dimos-cli/cli.ts dev --scene apt --port 8090 --headless --render cpu \
   &> /tmp/bridge.log &
 BRIDGE_PID=$!
 cd /app

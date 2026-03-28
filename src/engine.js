@@ -7189,7 +7189,7 @@ if (dimosMode) {
   (async () => {
     try {
       // 1. Auto-load scene
-      const sceneName = dimosScene || "hotel-lobby";
+      const sceneName = dimosScene || "apt";
       console.log(`[dimos] Loading scene: ${sceneName}`);
       const resp = await fetch(`/sims/${sceneName}.json`);
       if (!resp.ok) throw new Error(`Scene fetch failed: HTTP ${resp.status}`);

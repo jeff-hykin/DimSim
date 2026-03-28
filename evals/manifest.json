@@ -2,26 +2,6 @@
   "version": "1.0",
   "environments": [
     {
-      "name": "hotel-lobby",
-      "scene": "hotel-lobby",
-      "workflows": [
-        "greet-guest",
-        "reach-vase",
-        "reach-sofa",
-        "reach-elevator",
-        "reach-column",
-        "reach-piano",
-        "reach-reception"
-      ]
-    },
-    {
-      "name": "kitchen",
-      "scene": "apt",
-      "workflows": [
-        "get-spatula"
-      ]
-    },
-    {
       "name": "apt",
       "scene": "apt",
       "workflows": [

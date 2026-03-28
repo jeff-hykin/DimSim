@@ -79,7 +79,7 @@ Setup:
   --local <path>                 Use local archive instead of downloading
 
 Dev:
-  --scene <name>                 Scene to load (default: hotel-lobby)
+  --scene <name>                 Scene to load (default: apt)
   --port <n>                     Server port (default: 8090)
   --headless                     Launch headless browser (no GUI)
   --render gpu|cpu               Render mode for headless (default: gpu)
@@ -315,7 +315,7 @@ async function main() {
   // ── Dev ─────────────────────────────────────────────────────────────
   if (subcommand === "dev") {
     const distDir = await resolveDistDir();
-    const scene = (opts.scene as string) || "hotel-lobby";
+    const scene = (opts.scene as string) || "apt";
     const headless = opts.headless === true;
     const render = ((opts.render as string) === "cpu" ? "cpu" : "gpu") as RenderMode;
     const numChannels = Math.max(1, parseInt(opts.channels as string) || 1);
@@ -692,7 +692,7 @@ async function main() {
 
     const distDir = await resolveDistDir();
     const headless = opts.headless === true;
-    const scene = (opts.scene as string) || (opts.env as string) || "hotel-lobby";
+    const scene = (opts.scene as string) || (opts.env as string) || "apt";
     const parallel = Math.max(1, parseInt(opts.parallel as string) || 1);
     const render = ((opts.render as string) === "gpu" ? "gpu" : "cpu") as RenderMode;
     const defaultTimeout = render === "cpu" ? 120000 : 30000;

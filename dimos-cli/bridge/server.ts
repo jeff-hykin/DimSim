@@ -279,7 +279,7 @@ export async function startBridgeServer(options: BridgeServerOptions) {
     if (url.pathname === "/" || url.pathname === "/index.html") {
       try {
         let html = await Deno.readTextFile(`${distDir}/index.html`);
-        const inject = `<script>window.__dimosMode=true;window.__dimosScene="${scene || "hotel-lobby"}";${headless ? "window.__dimosHeadless=true;" : ""}</script>`;
+        const inject = `<script>window.__dimosMode=true;window.__dimosScene="${scene || "apt"}";${headless ? "window.__dimosHeadless=true;" : ""}</script>`;
         html = html.replace("</head>", `${inject}\n</head>`);
         return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
       } catch {
@@ -306,7 +306,7 @@ export async function startBridgeServer(options: BridgeServerOptions) {
 
 if (import.meta.main) {
   const distDir = new URL("../../dist", import.meta.url).pathname;
-  const scene = Deno.args.find((_a: string, i: number, arr: string[]) => arr[i - 1] === "--scene") || "hotel-lobby";
+  const scene = Deno.args.find((_a: string, i: number, arr: string[]) => arr[i - 1] === "--scene") || "apt";
   const port = parseInt(Deno.args.find((_a: string, i: number, arr: string[]) => arr[i - 1] === "--port") || "8090");
   await startBridgeServer({ port, distDir, scene });
 }
