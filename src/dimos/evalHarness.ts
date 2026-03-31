@@ -7,8 +7,10 @@
 
 import {
   scoreObjectDistance,
+  scoreRadiusContains,
   type SceneState,
   type ObjectDistanceCriteria,
+  type RadiusContainsCriteria,
 } from "./rubrics.ts";
 import type { DimosBridge } from "./dimosBridge.ts";
 
@@ -17,6 +19,7 @@ export interface StartPose { x?: number; y?: number; z?: number; yaw?: number; }
 
 export interface SuccessCriteria {
   objectDistance?: ObjectDistanceCriteria;
+  radiusContains?: RadiusContainsCriteria;
 }
 
 export interface Workflow {
@@ -159,6 +162,9 @@ export class EvalHarness {
     const scores: Record<string, any> = {};
     if (criteria.objectDistance) {
       scores.objectDistance = scoreObjectDistance(criteria.objectDistance, sceneState);
+    }
+    if (criteria.radiusContains) {
+      scores.radiusContains = scoreRadiusContains(criteria.radiusContains, sceneState);
     }
 
     const pass = Object.values(scores).every((s: any) => s.pass !== false);

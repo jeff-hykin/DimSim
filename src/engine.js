@@ -7506,9 +7506,17 @@ if (dimosMode) {
       });
       window.__evalHarness = evalHarness;
 
-      // Auto-follow dimos agent camera — uses existing agentCameraFollow system
-      // so the main camera shows the agent's POV directly (no GPU readback needed)
-      if (!window.__dimosHeadless) {
+      // Scene editor — script execution engine for sim editing (exec_js API)
+      const { SceneEditor } = await import("./dimos/sceneEditor.ts");
+      const sceneEditor = new SceneEditor({
+        bridge,
+        channel,
+        globals: { scene, THREE, RAPIER, rapierWorld, worldBody, renderer, camera, agent, assets, assetsGroup, gltfLoader },
+      });
+      window.__sceneEditor = sceneEditor;
+
+      // Agent POV only in headless (sensor capture needs it). Headed = free orbit.
+      if (window.__dimosHeadless) {
         enableAgentCameraFollow(agent.id);
       }
 
