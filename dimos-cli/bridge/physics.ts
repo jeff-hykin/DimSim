@@ -17,15 +17,33 @@ import { geometry_msgs, std_msgs } from "@dimos/msgs";
 import type { LCM } from "../vendor/lcm/lcm.ts";
 
 // -- Agent dimensions (must match AiAvatar.js / engine.js) --------------------
-const AGENT_RADIUS = 0.12;
-const AGENT_HALF_HEIGHT = 0.25;
+const DEFAULT_AGENT_RADIUS = 0.12;
+const DEFAULT_AGENT_HALF_HEIGHT = 0.25;
 const CONTROLLER_OFFSET = 0.05;
 
 // -- Physics constants --------------------------------------------------------
 const PHYSICS_HZ = 50;
 const PHYSICS_DT = 1.0 / PHYSICS_HZ;
-const GRAVITY_Y = -9.81;
-const SPEED_SCALE = 3.0; // Multiplier for cmd_vel (linear + angular)
+const DEFAULT_GRAVITY_Y = -9.81;
+const DEFAULT_SPEED_SCALE = 3.0; // Multiplier for cmd_vel (linear + angular)
+const DEFAULT_TURN_SCALE = 3.0;
+const DEFAULT_MAX_ALTITUDE = 50;
+
+/** Embodiment configuration passed from SceneClient / control channel. */
+export interface EmbodimentConfig {
+  radius?: number;
+  halfHeight?: number;
+  lidarMountHeight?: number;
+  embodimentType?: string;   // "ground" | "drone"
+  maxSpeed?: number;
+  turnRate?: number;
+  gravity?: number;
+  maxStepHeight?: number;
+  groundSnapDist?: number;
+  maxSlopeAngle?: number;
+  friction?: number;
+  maxAltitude?: number;
+}
 
 const CH_ODOM = "/odom#geometry_msgs.PoseStamped";
 const CH_CMD_VEL = "/cmd_vel#geometry_msgs.Twist";
@@ -44,6 +62,19 @@ export class ServerPhysics {
   private spineCollider: any;
   private controller: any;
   private timer: ReturnType<typeof setInterval> | null = null;
+
+  // Embodiment params
+  private embodimentType: string;
+  private speedScale: number;
+  private turnScale: number;
+  private gravity: number;
+  private maxAltitude: number;
+  private agentRadius: number;
+  private agentHalfHeight: number;
+  private friction: number;
+  private maxStepHeight: number;
+  private groundSnapDist: number;
+  private maxSlopeAngle: number;
 
   // Agent state
   private yaw = 0;
@@ -64,11 +95,36 @@ export class ServerPhysics {
     rapierWorld: any,
     RAPIER: any,
     sentSeqs: Set<number>,
+    embodiment?: EmbodimentConfig,
   ) {
     this.lcm = lcm;
     this.world = rapierWorld;
     this.RAPIER = RAPIER;
     this.sentSeqs = sentSeqs;
+
+    // Apply embodiment config with defaults
+    this.embodimentType = embodiment?.embodimentType ?? "ground";
+    this.speedScale = embodiment?.maxSpeed ?? DEFAULT_SPEED_SCALE;
+    this.turnScale = embodiment?.turnRate ?? DEFAULT_TURN_SCALE;
+    this.gravity = embodiment?.gravity ?? DEFAULT_GRAVITY_Y;
+    this.maxAltitude = embodiment?.maxAltitude ?? DEFAULT_MAX_ALTITUDE;
+    this.agentRadius = embodiment?.radius ?? DEFAULT_AGENT_RADIUS;
+    this.agentHalfHeight = embodiment?.halfHeight ?? DEFAULT_AGENT_HALF_HEIGHT;
+    this.friction = embodiment?.friction ?? 0.8;
+    this.maxStepHeight = embodiment?.maxStepHeight ?? 0.25;
+    this.groundSnapDist = embodiment?.groundSnapDist ?? 0.5;
+    this.maxSlopeAngle = embodiment?.maxSlopeAngle ?? 45;
+
+    this._createBodyAndColliders();
+
+    // Count colliders to verify world integrity
+    let colliderCount = 0;
+    this.world.colliders.forEach(() => { colliderCount++; });
+    // Quiet init — only log on error or reconfigure
+  }
+
+  private _createBodyAndColliders(): void {
+    const RAPIER = this.RAPIER;
 
     // Create agent body (kinematic position-based, like AiAvatar)
     this.body = this.world.createRigidBody(
@@ -77,22 +133,22 @@ export class ServerPhysics {
 
     // Main capsule collider
     this.collider = this.world.createCollider(
-      RAPIER.ColliderDesc.capsule(AGENT_HALF_HEIGHT, AGENT_RADIUS)
-        .setFriction(0.8),
+      RAPIER.ColliderDesc.capsule(this.agentHalfHeight, this.agentRadius)
+        .setFriction(this.friction),
       this.body,
     );
 
     // Spine collider (horizontal, behind body center — matches AiAvatar)
-    const spineHalfLen = Math.max(AGENT_RADIUS * 1.2, 0.13);
-    const spineRadius = Math.max(AGENT_RADIUS * 0.62, 0.07);
+    const spineHalfLen = Math.max(this.agentRadius * 1.2, 0.13);
+    const spineRadius = Math.max(this.agentRadius * 0.62, 0.07);
     const spineOffsetBack = Math.max(
-      AGENT_RADIUS * 2.2,
+      this.agentRadius * 2.2,
       spineHalfLen + spineRadius + 0.02,
     );
-    const spineOffsetY = Math.max(AGENT_HALF_HEIGHT * 0.35, 0.08);
+    const spineOffsetY = Math.max(this.agentHalfHeight * 0.35, 0.08);
     this.spineCollider = this.world.createCollider(
       RAPIER.ColliderDesc.capsule(spineHalfLen, spineRadius)
-        .setFriction(0.8)
+        .setFriction(this.friction)
         .setTranslation(0, spineOffsetY, -spineOffsetBack)
         .setRotation({
           x: Math.SQRT1_2,
@@ -105,23 +161,53 @@ export class ServerPhysics {
 
     // Character controller
     this.controller = this.world.createCharacterController(CONTROLLER_OFFSET);
-    this.controller.enableAutostep(0.25, 0.15, true);
-    this.controller.enableSnapToGround(0.5);
+    this.controller.enableAutostep(this.maxStepHeight, 0.15, true);
+    this.controller.enableSnapToGround(this.groundSnapDist);
     this.controller.setSlideEnabled(true);
-    this.controller.setMaxSlopeClimbAngle((45 * Math.PI) / 180);
+    this.controller.setMaxSlopeClimbAngle((this.maxSlopeAngle * Math.PI) / 180);
     this.controller.setMinSlopeSlideAngle((75 * Math.PI) / 180);
+  }
 
-    // Count colliders to verify world integrity
-    let colliderCount = 0;
-    this.world.colliders.forEach(() => { colliderCount++; });
-    console.log(`[physics] Server-side agent physics initialized (${colliderCount} colliders in world)`);
+  /** Reconfigure physics with new embodiment params (e.g. after set_embodiment). */
+  reconfigure(embodiment: EmbodimentConfig): void {
+    // Save current position and yaw
+    const pos = this.body.translation();
+    const savedYaw = this.yaw;
+
+    // Update params
+    this.embodimentType = embodiment.embodimentType ?? this.embodimentType;
+    this.speedScale = embodiment.maxSpeed ?? this.speedScale;
+    this.turnScale = embodiment.turnRate ?? this.turnScale;
+    this.gravity = embodiment.gravity ?? this.gravity;
+    this.maxAltitude = embodiment.maxAltitude ?? this.maxAltitude;
+    this.agentRadius = embodiment.radius ?? this.agentRadius;
+    this.agentHalfHeight = embodiment.halfHeight ?? this.agentHalfHeight;
+    this.friction = embodiment.friction ?? this.friction;
+    this.maxStepHeight = embodiment.maxStepHeight ?? this.maxStepHeight;
+    this.groundSnapDist = embodiment.groundSnapDist ?? this.groundSnapDist;
+    this.maxSlopeAngle = embodiment.maxSlopeAngle ?? this.maxSlopeAngle;
+
+    // Remove old colliders and body
+    if (this.spineCollider) this.world.removeCollider(this.spineCollider, false);
+    if (this.collider) this.world.removeCollider(this.collider, false);
+    if (this.body) this.world.removeRigidBody(this.body);
+
+    // Recreate with new params
+    this._createBodyAndColliders();
+
+    // Restore position and yaw
+    this.body.setNextKinematicTranslation({ x: pos.x, y: pos.y, z: pos.z });
+    this.yaw = savedYaw;
+    this.world.step();
+
+    console.log(`[physics] reconfigured: type=${this.embodimentType} radius=${this.agentRadius} halfHeight=${this.agentHalfHeight} speed=${this.speedScale} gravity=${this.gravity}`);
   }
 
   /** Set spawn position (Three.js Y-up). */
   setPosition(x: number, y: number, z: number): void {
     this.body.setNextKinematicTranslation({ x, y, z });
     this.world.step(); // apply immediately
-    console.log(`[physics] spawn set to (${x.toFixed(2)}, ${y.toFixed(2)}, ${z.toFixed(2)})`);
+    // quiet
   }
 
   /** Set callback for browser position sync. */
@@ -145,7 +231,7 @@ export class ServerPhysics {
     this.lcm.subscribe(CH_CMD_VEL, geometry_msgs.Twist, (msg: any) => {
       this.handleCmdVel(msg.data);
     });
-    console.log("[physics] Subscribed to cmd_vel on LCM");
+    // quiet
   }
 
   /** Start fixed-rate physics stepping + odom publish. */
@@ -153,7 +239,7 @@ export class ServerPhysics {
     if (this.timer) return;
     this.subscribeCmdVel();
     this.timer = setInterval(() => this._step(), 1000 / PHYSICS_HZ);
-    console.log(`[physics] Started ${PHYSICS_HZ}Hz physics loop`);
+    // quiet
   }
 
   stop(): void {
@@ -180,9 +266,10 @@ export class ServerPhysics {
   private _step(): void {
     // Safety timeout — zero velocity if no cmd_vel received recently
     const hasVel = Date.now() - this.cmdVelStamp < CMD_VEL_TIMEOUT_MS;
-    const linX = hasVel ? this.linX * SPEED_SCALE : 0;
-    const linZ = hasVel ? this.linZ * SPEED_SCALE : 0;
-    const angZ = hasVel ? this.angZ * SPEED_SCALE : 0;
+    const linX = hasVel ? this.linX * this.speedScale : 0;
+    const linY = hasVel ? this.linY * this.speedScale : 0;
+    const linZ = hasVel ? this.linZ * this.speedScale : 0;
+    const angZ = hasVel ? this.angZ * this.turnScale : 0;
 
     // Integrate yaw (ROS angZ → Three.js Y rotation)
     // ROS +z yaw = CCW from above = Three.js +Y rotation
@@ -192,29 +279,52 @@ export class ServerPhysics {
     const cosY = Math.cos(this.yaw);
     const sinY = Math.sin(this.yaw);
 
-    // ROS cmd_vel (x=fwd, y=left) → Three.js Y-up world frame
-    // ROS +x (forward) maps to Three.js +z*cos - +x*sin...
-    // Actually use the same transform as engine.js agent.update:
-    // Three.js: linZ = forward (ROS linX), linX = lateral (ROS linY)
-    const fwd = linX; // ROS forward
-    const desired = {
-      x: (fwd * sinY) * PHYSICS_DT,
-      y: GRAVITY_Y * PHYSICS_DT * PHYSICS_DT * 0.5, // gravity
-      z: (fwd * cosY) * PHYSICS_DT,
-    };
+    let newPos: { x: number; y: number; z: number };
 
-    // Collision-aware movement
-    this.controller.computeColliderMovement(
-      this.collider,
-      desired,
-      this.RAPIER.QueryFilterFlags.EXCLUDE_SENSORS,
-    );
-    const m = this.controller.computedMovement();
-    const newPos = {
-      x: pos.x + m.x,
-      y: pos.y + m.y,
-      z: pos.z + m.z,
-    };
+    if (this.embodimentType === "drone") {
+      // Drone: 6DoF movement, no gravity, altitude clamping
+      const fwd = linX;
+      const lat = linY;
+      const vert = linZ; // ROS z = vertical for drone
+      const desired = {
+        x: (fwd * sinY + lat * cosY) * PHYSICS_DT,
+        y: vert * PHYSICS_DT,
+        z: (fwd * cosY - lat * sinY) * PHYSICS_DT,
+      };
+
+      this.controller.computeColliderMovement(
+        this.collider,
+        desired,
+        this.RAPIER.QueryFilterFlags.EXCLUDE_SENSORS,
+      );
+      const m = this.controller.computedMovement();
+      newPos = {
+        x: pos.x + m.x,
+        y: Math.min(pos.y + m.y, this.maxAltitude),
+        z: pos.z + m.z,
+      };
+    } else {
+      // Ground robot: gravity, collision-aware
+      const fwd = linX;
+      const desired = {
+        x: (fwd * sinY) * PHYSICS_DT,
+        y: this.gravity * PHYSICS_DT * PHYSICS_DT * 0.5, // gravity
+        z: (fwd * cosY) * PHYSICS_DT,
+      };
+
+      this.controller.computeColliderMovement(
+        this.collider,
+        desired,
+        this.RAPIER.QueryFilterFlags.EXCLUDE_SENSORS,
+      );
+      const m = this.controller.computedMovement();
+      newPos = {
+        x: pos.x + m.x,
+        y: pos.y + m.y,
+        z: pos.z + m.z,
+      };
+    }
+
     this.body.setNextKinematicTranslation(newPos);
 
     // Step world to apply kinematic translation (needed for next computeColliderMovement)
@@ -224,9 +334,7 @@ export class ServerPhysics {
     this._publishOdom(newPos);
 
     // Debug: log first few steps
-    if (this.seq <= 5 || this.seq % 500 === 0) {
-      console.log(`[physics] step #${this.seq}: pos=(${newPos.x.toFixed(2)},${newPos.y.toFixed(2)},${newPos.z.toFixed(2)}) yaw=${this.yaw.toFixed(3)} vel=(${linX.toFixed(2)},${linZ.toFixed(2)}) angZ=${angZ.toFixed(3)}`);
-    }
+    // step logging removed — too noisy for dimos subprocess output
 
     // Notify browser for visual sync
     if (this.onPoseUpdate) {

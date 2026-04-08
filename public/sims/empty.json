@@ -1,0 +1,55 @@
+{
+  "version": "2.0",
+  "worldKey": "default",
+  "exportedAt": 0,
+  "tags": ["empty", "template"],
+  "dimosSpawnPoint": { "x": 0, "y": 1, "z": 0 },
+  "embodiment": {
+    "avatarUrl": ["/agent-model/unitree_go2.glb", "/agent-model/robot.glb"],
+    "radius": 0.12,
+    "halfHeight": 0.25,
+    "lidarMountHeight": 0.35,
+    "walkSpeed": 2.0,
+    "type": "quadruped"
+  },
+  "assets": [],
+  "primitives": [],
+  "lights": [
+    {
+      "id": "ambient-1",
+      "type": "ambient",
+      "color": "#ffffff",
+      "intensity": 0.6
+    },
+    {
+      "id": "dir-sun",
+      "type": "directional",
+      "color": "#fff5e6",
+      "intensity": 1.5,
+      "position": { "x": 10, "y": 20, "z": 10 },
+      "target": { "x": 0, "y": 0, "z": 0 },
+      "castShadow": true
+    },
+    {
+      "id": "hemi-1",
+      "type": "hemisphere",
+      "color": "#87ceeb",
+      "groundColor": "#4a7a4a",
+      "intensity": 0.4,
+      "position": { "x": 0, "y": 10, "z": 0 }
+    }
+  ],
+  "groups": [],
+  "sceneSettings": {
+    "sky": {
+      "enabled": true,
+      "topColor": "#1a6be0",
+      "horizonColor": "#c8ddf5",
+      "bottomColor": "#4a7a4a",
+      "brightness": 1.0,
+      "softness": 0.6,
+      "sunStrength": 0.3,
+      "sunHeight": 0.45
+    }
+  }
+}

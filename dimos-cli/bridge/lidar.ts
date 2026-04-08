@@ -23,12 +23,16 @@ const RATE_MS = 100; // 10 Hz
 const CH_LIDAR = "/lidar#sensor_msgs.PointCloud2";
 
 // Agent capsule geometry → lidar mount offset (must match engine.js)
-const PLAYER_HALF_HEIGHT = 0.25;
-const PLAYER_RADIUS = 0.12;
-const LIDAR_MOUNT_HEIGHT = 0.35;
-// Net Y offset from capsule center (odom position) to lidar origin:
-// groundY = agentY - (HALF_HEIGHT + RADIUS), lidarY = groundY + MOUNT_HEIGHT
-const LIDAR_Y_OFFSET = LIDAR_MOUNT_HEIGHT - (PLAYER_HALF_HEIGHT + PLAYER_RADIUS); // -0.02
+const DEFAULT_HALF_HEIGHT = 0.25;
+const DEFAULT_RADIUS = 0.12;
+const DEFAULT_LIDAR_MOUNT = 0.35;
+
+/** Subset of EmbodimentConfig relevant to lidar mount offset. */
+export interface LidarEmbodimentConfig {
+  radius?: number;
+  halfHeight?: number;
+  lidarMountHeight?: number;
+}
 
 // -- _lidarToCamQuat: transforms FLU (x=forward, y=left, z=up) → Three.js camera-local --
 // Matches engine.js _lidarToCamQuat derived from rotation matrix:
@@ -92,6 +96,7 @@ export class ServerLidar {
   private logN = 0;
   private publishing = false; // busy guard — skip scan if previous publish still in flight
   private excludeBody: any = null; // rigid body to exclude from raycasting (agent's own colliders)
+  private lidarYOffset: number;
 
   // Current robot pose (Three.js Y-up world frame)
   private px = 0;
@@ -105,16 +110,31 @@ export class ServerLidar {
 
   private ray: any; // Reusable Ray object (avoids 20k allocations per scan)
 
-  constructor(lcm: LCM, rapierWorld: any, RAPIER: any, sentSeqs: Set<number>) {
+  constructor(lcm: LCM, rapierWorld: any, RAPIER: any, sentSeqs: Set<number>, embodiment?: LidarEmbodimentConfig) {
     this.lcm = lcm;
     this.world = rapierWorld;
     this.RAPIER = RAPIER;
     this.sentSeqs = sentSeqs;
     this.ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 });
+
+    const halfH = embodiment?.halfHeight ?? DEFAULT_HALF_HEIGHT;
+    const radius = embodiment?.radius ?? DEFAULT_RADIUS;
+    const mount = embodiment?.lidarMountHeight ?? DEFAULT_LIDAR_MOUNT;
+    this.lidarYOffset = mount - (halfH + radius);
+
     // Step once with zero dt to initialize the query pipeline after snapshot restore.
     // queryPipeline.update() crashes on restored worlds (WASM type mismatch),
     // but world.step() internally updates the pipeline correctly.
     this.world.step();
+  }
+
+  /** Reconfigure lidar mount offset after embodiment change. */
+  reconfigure(embodiment: LidarEmbodimentConfig): void {
+    const halfH = embodiment.halfHeight ?? DEFAULT_HALF_HEIGHT;
+    const radius = embodiment.radius ?? DEFAULT_RADIUS;
+    const mount = embodiment.lidarMountHeight ?? DEFAULT_LIDAR_MOUNT;
+    this.lidarYOffset = mount - (halfH + radius);
+    console.log(`[lidar] reconfigured: lidarYOffset=${this.lidarYOffset.toFixed(3)}`);
   }
 
   /** Set rigid body to exclude from raycasting (agent's own capsule). */
@@ -125,7 +145,7 @@ export class ServerLidar {
   /** Update robot pose. Position is capsule center (odom); we apply lidar mount offset internally. */
   updatePose(x: number, y: number, z: number, qx: number, qy: number, qz: number, qw: number): void {
     this.px = x;
-    this.py = y + LIDAR_Y_OFFSET; // capsule center → lidar mount height
+    this.py = y + this.lidarYOffset; // capsule center → lidar mount height
     this.pz = z;
     this.qx = qx;
     this.qy = qy;
@@ -136,7 +156,7 @@ export class ServerLidar {
 
   start(): void {
     if (this.timer) return;
-    console.log(`[lidar] started ${1000 / RATE_MS}Hz server-side raycasting (${NUM_POINTS} pts)`);
+    // quiet
     this.timer = setInterval(() => this._scan(), RATE_MS);
   }
 
@@ -213,9 +233,7 @@ export class ServerLidar {
       if (n === 0) return;
 
       this.logN++;
-      if (this.logN <= 3 || this.logN % 100 === 0) {
-        console.log(`[lidar] scan #${this.logN}: ${n} pts`);
-      }
+      // scan logging removed — too noisy
 
       // Encode PointCloud2: Y-up → Z-up (ROS) cyclic permutation x→y, y→z, z→x
       const pointStep = 16;

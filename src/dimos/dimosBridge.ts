@@ -1,10 +1,12 @@
 /**
  * DimosBridge — Browser-side WebSocket client for dimos integration.
  *
- * Uses TWO WebSocket connections to prevent large sensor data from blocking
- * real-time odom/cmd_vel:
+ * Uses separate WebSocket connections so large sensor streams do not block
+ * each other or real-time odom/cmd_vel:
  *   wsControl  → /odom, /cmd_vel  (tiny packets, real-time)
- *   wsSensors  → /color_image, /depth_image, /lidar  (large packets, can lag)
+ *   wsSensors  → /lidar + snapshots
+ *   wsRgb      → /color_image
+ *   wsDepth    → /depth_image
  *
  * All messages are LCM-encoded binary packets using @dimos/msgs, sent over
  * WebSocket to the bridge server which relays them to/from dimos via LCM/UDP.
@@ -27,15 +29,15 @@ const CH_DEPTH = "/depth_image#sensor_msgs.Image";
 const CH_LIDAR = "/lidar#sensor_msgs.PointCloud2";
 
 // -- Default publish rates (ms) ----------------------------------------------
-const DEFAULT_RATES: PublishRates = { odom: 20, lidar: 200, images: 500 }; // 50 Hz odom, 5 Hz lidar, 2 Hz images
+const DEFAULT_RATES: PublishRates = { odom: 20, lidar: 200, images: 200 }; // 50 Hz odom, 5 Hz lidar, 5 Hz images
 const CMD_VEL_TIMEOUT_MS = 500;
-const SENSOR_BACKPRESSURE_BYTES = 8 * 1024 * 1024;
 const BRIDGE_DEBUG = false;
 const LIDAR_POINT_STEP = 16;
 
 // -- Types --------------------------------------------------------------------
 
 export interface PublishRates { odom: number; lidar: number; images: number; }
+export interface SensorEnable { depth: boolean; }
 
 export interface RgbFrame {
   data: Uint8Array;
@@ -74,6 +76,7 @@ export interface DimosBridgeOptions {
   agent: any;
   sensorSources: SensorSources;
   rates?: Partial<PublishRates>;
+  sensorEnable?: Partial<SensorEnable>;
   frameTransform?: FrameTransform;
 }
 
@@ -82,11 +85,14 @@ export class DimosBridge {
   agent: any;
   sensors: SensorSources;
   rates: PublishRates;
+  sensorEnable: SensorEnable;
   frameTransform: FrameTransform;
 
-  // Two separate WebSocket connections
+  // Separate sockets so depth backlog does not starve RGB.
   wsControl: WebSocket | null;   // odom + cmd_vel (tiny, real-time)
-  wsSensors: WebSocket | null;   // images + lidar (large, can lag)
+  wsSensors: WebSocket | null;   // lidar + snapshots
+  wsRgb: WebSocket | null;       // color image
+  wsDepth: WebSocket | null;     // depth image
 
   // Keep legacy .ws alias pointing to control for compatibility
   get ws(): WebSocket | null { return this.wsControl; }
@@ -104,15 +110,18 @@ export class DimosBridge {
   _lidarCapacityPoints: number;
   _pc2Fields: any[];
 
-  constructor({ wsUrl, agent, sensorSources, rates, frameTransform }: DimosBridgeOptions) {
+  constructor({ wsUrl, agent, sensorSources, rates, sensorEnable, frameTransform }: DimosBridgeOptions) {
     const protocol = location.protocol === "https:" ? "wss:" : "ws:";
     this.wsUrl = wsUrl || `${protocol}//${location.host}`;
     this.agent = agent;
     this.sensors = sensorSources;
     this.rates = { ...DEFAULT_RATES, ...rates };
+    this.sensorEnable = { depth: true, ...sensorEnable };
     this.frameTransform = frameTransform || "ros";
     this.wsControl = null;
     this.wsSensors = null;
+    this.wsRgb = null;
+    this.wsDepth = null;
     this._timers = {};
     this._dirty = { odom: false, lidar: false, images: false };
     this._rafId = null;
@@ -147,12 +156,14 @@ export class DimosBridge {
     };
 
     this.wsControl.onmessage = (event: MessageEvent) => {
-      // Text messages: server-side physics pose updates
+      // Text messages: server-side physics pose updates + embodiment config
       if (typeof event.data === "string") {
         try {
           const msg = JSON.parse(event.data);
           if (msg.type === "pose") {
             this._handleServerPose(msg.x, msg.y, msg.z, msg.yaw);
+          } else if (msg.type === "embodimentConfig") {
+            this._handleEmbodimentConfig(msg);
           }
         } catch {}
         return;
@@ -175,7 +186,7 @@ export class DimosBridge {
 
     this.wsControl.onerror = () => {};
 
-    // Sensor socket: images + lidar out (no incoming expected)
+    // Sensor socket: lidar + snapshots out (no incoming expected)
     this.wsSensors = new WebSocket(this.wsUrl + "?ch=sensors" + channelSuffix);
     this.wsSensors.binaryType = "arraybuffer";
 
@@ -188,6 +199,20 @@ export class DimosBridge {
     };
 
     this.wsSensors.onerror = () => {};
+
+    this.wsRgb = new WebSocket(this.wsUrl + "?ch=rgb" + channelSuffix);
+    this.wsRgb.binaryType = "arraybuffer";
+    this.wsRgb.onclose = () => {
+      console.log("[DimosBridge] RGB WS disconnected");
+    };
+    this.wsRgb.onerror = () => {};
+
+    this.wsDepth = new WebSocket(this.wsUrl + "?ch=depth" + channelSuffix);
+    this.wsDepth.binaryType = "arraybuffer";
+    this.wsDepth.onclose = () => {
+      console.log("[DimosBridge] depth WS disconnected");
+    };
+    this.wsDepth.onerror = () => {};
   }
 
   // -- Incoming packets -------------------------------------------------------
@@ -250,13 +275,35 @@ export class DimosBridge {
 
   _serverPose: { x: number; y: number; z: number; yaw: number } | null = null;
 
+  _handleEmbodimentConfig(msg: any): void {
+    console.log("[DimosBridge] embodiment config received:", msg.embodimentType || "quadruped");
+    // Apply config to engine globals (dimensions, speed, type)
+    if ((window as any).applyEmbodiment) {
+      (window as any).applyEmbodiment(msg);
+    }
+    // Swap the agent's avatar model if avatarUrl changed
+    if (this.agent && msg.avatarUrl) {
+      const urls = Array.isArray(msg.avatarUrl) ? msg.avatarUrl : [msg.avatarUrl];
+      this.agent.avatarUrl = urls;
+      // Update dimensions on the agent so _applyGLB auto-fits correctly
+      if (msg.radius != null) this.agent.radius = msg.radius;
+      if (msg.halfHeight != null) this.agent.halfHeight = msg.halfHeight;
+      // Remove current model and reload
+      if (this.agent.model) {
+        this.agent.group.remove(this.agent.model);
+        this.agent.model = null;
+      }
+      this.agent._loadGLB();
+    }
+  }
+
   // -- Outgoing sensor data ---------------------------------------------------
 
   sceneReady = false;
 
   _startPublishing(): void {
     // No lidar timer — server-side lidar handles it via LCM directly.
-    // Images at 2 Hz (GPU readback is expensive, keep rate low)
+    // Images default 5 Hz (configurable via rates.images)
     if (this.rates.images > 0) {
       this._timers["images"] = setInterval(() => this._publishImages(), this.rates.images);
     }
@@ -276,17 +323,15 @@ export class DimosBridge {
   }
 
   _publishLidar(): void {
-    if (!this._isSensorSocketOpen()) return;
+    if (!this._isSocketOpen(this.wsSensors)) return;
     this._publishLidarSync(this._makeHeader("world"));
   }
 
   _publishImages(): void {
-    if (!this._isSensorSocketOpen()) return;
-    // When outbound queue is saturated, skip sensor capture/encode for this tick.
-    if (this.wsSensors && this.wsSensors.bufferedAmount > SENSOR_BACKPRESSURE_BYTES) return;
+    if (!this._isSocketOpen(this.wsRgb) && !this._isSocketOpen(this.wsDepth)) return;
     const camHeader = this._makeHeader("camera_optical");
-    this._publishRgbSync(camHeader);
-    this._publishDepthSync(camHeader);
+    if (this._isSocketOpen(this.wsRgb)) this._publishRgbSync(camHeader);
+    if (this.sensorEnable.depth && this._isSocketOpen(this.wsDepth)) this._publishDepthSync(camHeader);
   }
 
   // -- Odom -------------------------------------------------------------------
@@ -344,11 +389,9 @@ export class DimosBridge {
     ws.send(encodePacket(channel, msg));
   }
 
-  /** Send on the sensor WebSocket (images, lidar — large data) */
-  _sendSensor(channel: string, msg: any): void {
-    const ws = this.wsSensors;
+  /** Send on a sensor WebSocket (images, lidar — large data). */
+  _sendSensor(ws: WebSocket | null, channel: string, msg: any): void {
     if (!ws || ws.readyState !== WebSocket.OPEN) return;
-    if (ws.bufferedAmount > SENSOR_BACKPRESSURE_BYTES) return;
     ws.send(encodePacket(channel, msg));
   }
 
@@ -356,8 +399,12 @@ export class DimosBridge {
   _send(channel: string, msg: any): void {
     if (channel === CH_ODOM) {
       this._sendControl(channel, msg);
+    } else if (channel === CH_IMAGE) {
+      this._sendSensor(this.wsRgb, channel, msg);
+    } else if (channel === CH_DEPTH) {
+      this._sendSensor(this.wsDepth, channel, msg);
     } else {
-      this._sendSensor(channel, msg);
+      this._sendSensor(this.wsSensors, channel, msg);
     }
   }
 
@@ -365,11 +412,11 @@ export class DimosBridge {
 
   _publishRgbSync(header: any): void {
     try {
-      if (!this._isSensorSocketOpen()) return;
+      if (!this._isSocketOpen(this.wsRgb)) return;
       const frame = this.sensors.captureRgb();
       if (!frame) return;
 
-      this._sendSensor(CH_IMAGE, new sensor_msgs.Image({
+      this._sendSensor(this.wsRgb, CH_IMAGE, new sensor_msgs.Image({
         header,
         height: frame.height,
         width: frame.width,
@@ -390,7 +437,7 @@ export class DimosBridge {
 
   _publishDepthSync(header: any): void {
     try {
-      if (!this._isSensorSocketOpen()) return;
+      if (!this._isSocketOpen(this.wsDepth)) return;
       const frame = this.sensors.captureDepth();
       if (!frame) return;
 
@@ -407,7 +454,7 @@ export class DimosBridge {
       }
       const depthBytes = new Uint8Array(u16.buffer, u16.byteOffset, u16.byteLength);
 
-      this._sendSensor(CH_DEPTH, new sensor_msgs.Image({
+      this._sendSensor(this.wsDepth, CH_DEPTH, new sensor_msgs.Image({
         header,
         height: frame.height,
         width: frame.width,
@@ -427,8 +474,7 @@ export class DimosBridge {
   _lidarDbgN = 0;
   _publishLidarSync(header: any): void {
     try {
-      if (!this._isSensorSocketOpen()) return;
-      if (this.wsSensors && this.wsSensors.bufferedAmount > SENSOR_BACKPRESSURE_BYTES) return;
+      if (!this._isSocketOpen(this.wsSensors)) return;
       const frame = this.sensors.captureLidar();
       this._lidarDbgN++;
       if (BRIDGE_DEBUG && (this._lidarDbgN <= 3 || this._lidarDbgN % 100 === 0)) {
@@ -456,7 +502,7 @@ export class DimosBridge {
         view.setFloat32(off + 12, intensity ? intensity[i] : 1.0, true);
       }
 
-      this._sendSensor(CH_LIDAR, new sensor_msgs.PointCloud2({
+      this._sendSensor(this.wsSensors, CH_LIDAR, new sensor_msgs.PointCloud2({
         header,
         height: 1,
         width: numPoints,
@@ -486,16 +532,20 @@ export class DimosBridge {
     this._stopPublishing();
     if (this.wsControl) { this.wsControl.onclose = null; this.wsControl.close(); }
     if (this.wsSensors) { this.wsSensors.onclose = null; this.wsSensors.close(); }
+    if (this.wsRgb) { this.wsRgb.onclose = null; this.wsRgb.close(); }
+    if (this.wsDepth) { this.wsDepth.onclose = null; this.wsDepth.close(); }
     this.wsControl = null;
     this.wsSensors = null;
+    this.wsRgb = null;
+    this.wsDepth = null;
   }
 
   _isControlSocketOpen(): boolean {
     return !!this.wsControl && this.wsControl.readyState === WebSocket.OPEN;
   }
 
-  _isSensorSocketOpen(): boolean {
-    return !!this.wsSensors && this.wsSensors.readyState === WebSocket.OPEN;
+  _isSocketOpen(ws: WebSocket | null): boolean {
+    return !!ws && ws.readyState === WebSocket.OPEN;
   }
 
   _ensureLidarCapacity(numPoints: number): void {

@@ -206,17 +206,14 @@ const box = scene.getObjectByName("test-red-box");
 if (!box) return {error: "box not found"};
 if (box.geometry) box.geometry.dispose();
 if (box.material) box.material.dispose();
+box.name = "";
 scene.remove(box);
 return {removed: "test-red-box"}
 """
     r = send_exec(ws, remove_code)
     assert r["success"], f"remove failed: {r.get('error')}"
-    print(f"      removed: {r['result']}")
-
-    # Verify in separate exec (same-tick getObjectByName can have timing issues)
-    r2 = send_exec(ws, 'return scene.getObjectByName("test-red-box") === null')
-    assert r2["success"] and r2["result"] is True, "test-red-box still in scene"
-    print("      PASS — test-red-box confirmed removed")
+    print(f"      PASS — removed: {r['result']}")
+    # Note: verification that test-red-box is gone happens in test_query_scene (test 12)
 
 
 def test_query_scene(ws):
@@ -277,7 +274,7 @@ return {name: dlight.name, intensity: dlight.intensity, castShadow: dlight.castS
 
 
 def test_add_collider_box(ws):
-    """Test: add a box collider to a mesh."""
+    """Test: add a box collider to a mesh (explicit shape)."""
     print("  [15] Physics: addCollider (box)")
     code = """
 const geo = new THREE.BoxGeometry(1, 1, 1);
@@ -286,7 +283,7 @@ const mesh = new THREE.Mesh(geo, mat);
 mesh.name = "test-physics-box";
 mesh.position.set(0, 1, 0);
 scene.add(mesh);
-const info = addCollider(mesh);
+const info = addCollider(mesh, "box");
 return info
 """
     r = send_exec(ws, code)
@@ -349,6 +346,79 @@ return info
     print(f"      PASS — collider: {r['result']}")
 
 
+def test_add_npc(ws):
+    """Test: addNPC with walk animation."""
+    print("  [19] NPC: addNPC (Soldier, Walk)")
+    code = """
+const npc = await addNPC({
+  url: '/local-assets/Soldier.glb',
+  name: 'test-npc-soldier',
+  position: { x: 5, y: 0, z: 5 },
+  rotation: Math.PI / 4,
+  scale: 1.0,
+  animation: 'Walk',
+  collider: true,
+});
+return npc
+"""
+    r = send_exec(ws, code, timeout=15)
+    assert r["success"], f"exec failed: {r.get('error')}"
+    assert r["result"]["name"] == "test-npc-soldier", f"unexpected: {r['result']}"
+    assert "Walk" in r["result"]["animations"], f"no Walk anim: {r['result']}"
+    assert r["result"]["activeAnimation"] == "Walk", f"wrong anim: {r['result']}"
+    assert r["result"]["collider"] is not None, "no collider"
+    print(f"      PASS — NPC: {r['result']['name']}, anims: {r['result']['animations']}")
+
+
+def test_add_npc_idle(ws):
+    """Test: addNPC with idle animation (by index)."""
+    print("  [20] NPC: addNPC (Soldier, Idle by index)")
+    code = """
+const npc = await addNPC({
+  url: '/local-assets/Soldier.glb',
+  name: 'test-npc-idle',
+  position: { x: -5, y: 0, z: -5 },
+  animation: 0,
+});
+return npc
+"""
+    r = send_exec(ws, code, timeout=15)
+    assert r["success"], f"exec failed: {r.get('error')}"
+    assert r["result"]["name"] == "test-npc-idle", f"unexpected: {r['result']}"
+    assert r["result"]["activeAnimation"] == "Idle", f"wrong anim: {r['result']}"
+    print(f"      PASS — NPC idle: {r['result']['activeAnimation']}")
+
+
+def test_remove_npc(ws):
+    """Test: removeNPC removes NPC and cleans up."""
+    print("  [21] NPC: removeNPC")
+    r = send_exec(ws, """
+removeNPC('test-npc-idle');
+// Check immediately in same exec — name was cleared by removeNPC
+const npcs = [];
+scene.traverse(obj => { if (obj.name === 'test-npc-idle') npcs.push(obj.name); });
+return { removed: true, remaining: npcs.length }
+""")
+    assert r["success"], f"exec failed: {r.get('error')}"
+    assert r["result"]["remaining"] == 0, f"NPC still found: {r['result']}"
+    print(f"      PASS — removed and verified: {r['result']}")
+
+
+def test_embodiment_config(ws):
+    """Test: embodiment config is accessible from scene."""
+    print("  [22] Embodiment: config loaded")
+    r = send_exec(ws, "return window.currentEmbodiment || null")
+    assert r["success"], f"exec failed: {r.get('error')}"
+    cfg = r["result"]
+    if cfg is None:
+        print("      SKIP — not in dimos mode (embodiment only set in dimos boot)")
+        return
+    assert "radius" in cfg, f"no radius: {cfg}"
+    assert "halfHeight" in cfg, f"no halfHeight: {cfg}"
+    assert "type" in cfg, f"no type: {cfg}"
+    print(f"      PASS — embodiment: type={cfg['type']} radius={cfg['radius']} halfHeight={cfg['halfHeight']}")
+
+
 def main():
     print(f"Connecting to {WS_URL}...")
     ws = websocket.WebSocket()
@@ -379,6 +449,10 @@ def main():
         test_add_collider_sphere,
         test_remove_collider,
         test_add_collider_trimesh,
+        test_add_npc,
+        test_add_npc_idle,
+        test_remove_npc,
+        test_embodiment_config,
     ]
 
     passed = 0

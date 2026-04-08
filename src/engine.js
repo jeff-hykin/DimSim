@@ -5573,7 +5573,7 @@ function createAiAgent({ ephemeral = false } = {}) {
     senseRadius: 3.0,
     walkSpeed: 2.0,
     // Headless mode in dimos: skip visual rendering, keep colliders for physics
-    headless: dimosMode,
+    headless: false,
     vlm: {
       // In dimos mode, VLM is disabled — agent pose is driven externally via /odom.
       // Ephemeral workers auto-enable; manually spawned agents start idle.
@@ -7216,18 +7216,70 @@ if (dimosMode) {
       };
       console.log(`[dimos] Agent spawned: ${agent.id}`);
 
-      // 3. Set up fast offscreen RGB capture for dimos (no splat warm-up delay)
-      const _dimosCapW = 960, _dimosCapH = 432;
+      // 3. Set up fixed-size offscreen capture for dimos.
+      // Keep sensor cost independent of the headed browser window size.
+      const _dimosCapW = 640, _dimosCapH = 288;
       const _dimosCapTarget = new THREE.WebGLRenderTarget(_dimosCapW, _dimosCapH, {
         minFilter: THREE.LinearFilter, magFilter: THREE.LinearFilter,
         format: THREE.RGBAFormat, depthBuffer: true, stencilBuffer: false,
       });
-      const _dimosCapCam = new THREE.PerspectiveCamera(80, _dimosCapW / _dimosCapH, camera.near, camera.far);
+      // Go2 depth camera: 87° horizontal. At 640x288 (2.22:1 aspect), that's 46° vertical.
+      const _dimosFov = window.__dimosCameraFov || 46;
+      const _dimosCapCam = new THREE.PerspectiveCamera(_dimosFov, _dimosCapW / _dimosCapH, camera.near, camera.far);
       const _dimosCapBuf = new Uint8Array(_dimosCapW * _dimosCapH * 4);
       const _dimosCapCvs = document.createElement("canvas");
       _dimosCapCvs.width = _dimosCapW;
       _dimosCapCvs.height = _dimosCapH;
       const _dimosCapCtx = _dimosCapCvs.getContext("2d");
+      const _dimosDepthTarget = new THREE.WebGLRenderTarget(_dimosCapW, _dimosCapH, {
+        minFilter: THREE.NearestFilter,
+        magFilter: THREE.NearestFilter,
+        format: THREE.RGBAFormat,
+        type: THREE.UnsignedByteType,
+        depthBuffer: true,
+        stencilBuffer: false,
+      });
+      _dimosDepthTarget.texture.generateMipmaps = false;
+      _dimosDepthTarget.depthTexture = new THREE.DepthTexture(_dimosCapW, _dimosCapH, THREE.UnsignedIntType);
+      _dimosDepthTarget.depthTexture.minFilter = THREE.NearestFilter;
+      _dimosDepthTarget.depthTexture.magFilter = THREE.NearestFilter;
+      _dimosDepthTarget.depthTexture.generateMipmaps = false;
+      const _dimosMetricTarget = new THREE.WebGLRenderTarget(_dimosCapW, _dimosCapH, {
+        minFilter: THREE.NearestFilter,
+        magFilter: THREE.NearestFilter,
+        format: rgbdMetricUsesR32F ? THREE.RedFormat : THREE.RGBAFormat,
+        type: rgbdMetricTargetType,
+        depthBuffer: false,
+        stencilBuffer: false,
+      });
+      if (rgbdMetricUsesR32F) _dimosMetricTarget.texture.internalFormat = "R32F";
+      _dimosMetricTarget.texture.generateMipmaps = false;
+
+      function _dimosReadMetricDepthFrameMeters() {
+        const w = _dimosMetricTarget.width;
+        const h = _dimosMetricTarget.height;
+        if (!w || !h) return null;
+
+        if (rgbdMetricUsesR32F) {
+          const depth = new Float32Array(w * h);
+          renderer.readRenderTargetPixels(_dimosMetricTarget, 0, 0, w, h, depth);
+          return depth;
+        }
+
+        if (_dimosMetricTarget.texture.type === THREE.FloatType) {
+          const raw = new Float32Array(w * h * 4);
+          renderer.readRenderTargetPixels(_dimosMetricTarget, 0, 0, w, h, raw);
+          const depth = new Float32Array(w * h);
+          for (let i = 0; i < w * h; i++) depth[i] = raw[i * 4 + 0];
+          return depth;
+        }
+
+        const raw = new Uint16Array(w * h * 4);
+        renderer.readRenderTargetPixels(_dimosMetricTarget, 0, 0, w, h, raw);
+        const depth = new Float32Array(w * h);
+        for (let i = 0; i < w * h; i++) depth[i] = halfToFloat(raw[i * 4 + 0]);
+        return depth;
+      }
 
       function _dimosCaptureRgb() {
         const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
@@ -7255,7 +7307,7 @@ if (dimosMode) {
         return { data: flipped, width: _dimosCapW, height: _dimosCapH };
       }
 
-      // Offscreen depth capture from agent POV (uses main RGBD pipeline targets)
+      // Offscreen depth capture from agent POV using a dedicated low-res target.
       function _dimosCaptureDepth() {
         const [ax, ay, az] = agent.getPosition?.() || [0, 0, 0];
         const yaw = agent.group?.rotation?.y ?? 0;
@@ -7267,13 +7319,61 @@ if (dimosMode) {
         _dimosCapCam.updateProjectionMatrix();
         _dimosCapCam.updateMatrixWorld(true);
 
-        renderRgbdMetricPassOffscreen(_dimosCapCam);
+        const prevDepthTex = rgbdMetricMaterial.uniforms.uDepthTex.value;
+        const prevNear = rgbdMetricMaterial.uniforms.uNear.value;
+        const prevFar = rgbdMetricMaterial.uniforms.uFar.value;
+        const prevNoise = rgbdMetricMaterial.uniforms.uNoiseEnabled.value;
+        const prevSpeckle = rgbdMetricMaterial.uniforms.uSpeckleEnabled.value;
+        rgbdMetricMaterial.uniforms.uDepthTex.value = _dimosDepthTarget.depthTexture;
+        rgbdMetricMaterial.uniforms.uNear.value = _dimosCapCam.near;
+        rgbdMetricMaterial.uniforms.uFar.value = _dimosCapCam.far;
+        rgbdMetricMaterial.uniforms.uNoiseEnabled.value = rgbdNoiseEnabled ? 1.0 : 0.0;
+        rgbdMetricMaterial.uniforms.uSpeckleEnabled.value = rgbdSpeckleEnabled ? 1.0 : 0.0;
+
+        const savedOverride = scene.overrideMaterial;
+        const savedAssets = assetsGroup.visible;
+        const savedPrims = primitivesGroup.visible;
+        const savedLights = lightsGroup.visible;
+        const savedTags = tagsGroup.visible;
+        const savedLidarViz = lidarVizGroup.visible;
+        const savedRgbdPc = rgbdPcOverlayGroup.visible;
+
+        scene.overrideMaterial = null;
+        assetsGroup.visible = true;
+        primitivesGroup.visible = true;
+        lightsGroup.visible = true;
+        tagsGroup.visible = false;
+        lidarVizGroup.visible = false;
+        rgbdPcOverlayGroup.visible = false;
+
+        renderer.setRenderTarget(_dimosDepthTarget);
+        renderer.setClearColor(0x000000, RGBD_CLEAR_ALPHA);
+        renderer.clear(true, true, true);
+        renderer.render(scene, _dimosCapCam);
+
+        renderer.setRenderTarget(_dimosMetricTarget);
+        renderer.setClearColor(0x000000, RGBD_CLEAR_ALPHA);
+        renderer.clear(true, true, true);
+        renderer.render(rgbdMetricScene, rgbdPostCamera);
+
+        scene.overrideMaterial = savedOverride;
+        assetsGroup.visible = savedAssets;
+        primitivesGroup.visible = savedPrims;
+        lightsGroup.visible = savedLights;
+        tagsGroup.visible = savedTags;
+        lidarVizGroup.visible = savedLidarViz;
+        rgbdPcOverlayGroup.visible = savedRgbdPc;
+        rgbdMetricMaterial.uniforms.uDepthTex.value = prevDepthTex;
+        rgbdMetricMaterial.uniforms.uNear.value = prevNear;
+        rgbdMetricMaterial.uniforms.uFar.value = prevFar;
+        rgbdMetricMaterial.uniforms.uNoiseEnabled.value = prevNoise;
+        rgbdMetricMaterial.uniforms.uSpeckleEnabled.value = prevSpeckle;
         renderer.setRenderTarget(null);
 
-        const depthData = readRgbdMetricDepthFrameMeters();
+        const depthData = _dimosReadMetricDepthFrameMeters();
         if (!depthData) return null;
 
-        const dw = rgbdMetricTarget.width, dh = rgbdMetricTarget.height;
+        const dw = _dimosMetricTarget.width, dh = _dimosMetricTarget.height;
 
         // Flip rows: WebGL reads bottom-to-top, image convention is top-to-bottom
         const flipped = new Float32Array(dw * dh);
@@ -7379,6 +7479,8 @@ if (dimosMode) {
       const { DimosBridge } = await import("./dimos/dimosBridge.ts");
       const bridge = new DimosBridge({
         agent,
+        rates: window.__dimosSensorRates || undefined,
+        sensorEnable: window.__dimosSensorEnable || undefined,
         sensorSources: {
           captureRgb: () => {
             const frame = _dimosCaptureRgb();
@@ -7435,9 +7537,17 @@ if (dimosMode) {
       bridge.connect();
       bridge.sceneReady = true;
       window.__dimosBridge = bridge;
+      window.__dimosCapCam = _dimosCapCam;
       window.__dimosAgent = agent;
 
       // Send Rapier world snapshot to bridge server for server-side physics + lidar.
+      // Flush any deferred collider builds first — primitives (floor, walls) may be
+      // queued in _pendingColliderBuilds if they were created before the render loop ran.
+      flushPendingColliderBuilds();
+      let _snapshotColliders = 0;
+      rapierWorld.colliders.forEach(() => { _snapshotColliders++; });
+      console.log(`[dimos] Flushed collider queue — ${_snapshotColliders} colliders in world before snapshot`);
+
       // Format: [DSSN 4B][spawnX f32][spawnY f32][spawnZ f32][snapshot...]
       const _waitSensorWs = () => {
         if (bridge.wsSensors && bridge.wsSensors.readyState === WebSocket.OPEN) {
@@ -7520,12 +7630,18 @@ if (dimosMode) {
         enableAgentCameraFollow(agent.id);
       }
 
-      // 7a. DimSim version badge
+      // 7a. dimos mode UI cleanup
       if (!window.__dimosHeadless) {
-        const badge = document.createElement("div");
-        badge.style.cssText = "position:fixed;bottom:8px;left:8px;z-index:99999;background:rgba(0,0,0,0.75);color:#fff;font:11px/1.4 monospace;padding:6px 10px;border-radius:6px;pointer-events:none;user-select:none;";
-        badge.textContent = "DimSim v0.1.12 — dimos mode";
-        document.body.appendChild(badge);
+        const sidePanel = document.getElementById("agent-panel");
+        if (sidePanel) sidePanel.style.display = "none";
+        const panelOpen = document.getElementById("sim-panel-open");
+        if (panelOpen) panelOpen.style.display = "none";
+        const cmdBar = document.getElementById("agent-command-bar");
+        if (cmdBar) cmdBar.style.display = "none";
+        const hints = document.createElement("div");
+        hints.style.cssText = "position:fixed;bottom:8px;left:8px;z-index:99999;background:rgba(0,0,0,0.7);color:rgba(255,255,255,0.8);font:12px/1.6 'Inter',sans-serif;padding:8px 14px;border-radius:8px;pointer-events:none;user-select:none;";
+        hints.innerHTML = "<b>WASD</b> move &nbsp; <b>Space</b> up &nbsp; <b>Shift</b> down &nbsp; <b>G</b> ghost mode";
+        document.body.appendChild(hints);
       }
 
       // 7b. Debug panel (integration diagnostics) — hidden for now

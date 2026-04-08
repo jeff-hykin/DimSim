@@ -76,18 +76,18 @@ export class EvalHarness {
 
   _patchWsOnMessage(ws: WebSocket): void {
     const origOnMessage = ws.onmessage;
+    const evalTypes = new Set(["startWorkflow", "stopWorkflow", "loadEnv", "ping"]);
     ws.onmessage = (event: MessageEvent) => {
       if (typeof event.data === "string") {
         try {
           const cmd = JSON.parse(event.data);
-          if (!cmd.type || cmd.type === "pose") {
-            if (origOnMessage) (origOnMessage as (e: MessageEvent) => void).call(ws, event);
+          if (cmd.type && evalTypes.has(cmd.type)) {
+            this._handleCommand(cmd);
             return;
           }
-          this._handleCommand(cmd);
-        } catch {
-          if (origOnMessage) (origOnMessage as (e: MessageEvent) => void).call(ws, event);
-        }
+        } catch { /* not JSON, pass through */ }
+        // Pass all non-eval text messages through to origOnMessage
+        if (origOnMessage) (origOnMessage as (e: MessageEvent) => void).call(ws, event);
         return;
       }
       if (origOnMessage) (origOnMessage as (e: MessageEvent) => void).call(ws, event);
@@ -119,7 +119,7 @@ export class EvalHarness {
         this._send({ type: "pong", ts: Date.now() });
         break;
       default:
-        console.warn("[eval] unknown command:", cmd.type);
+        break;
     }
   }
 

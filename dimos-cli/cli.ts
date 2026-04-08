@@ -86,6 +86,11 @@ Dev:
   --channels <n>                 Number of parallel browser pages (multi-instance)
   --eval <workflow>              Run eval after browser connects
   --env <name>                   Environment filter
+  --image-rate <ms>              Image publish interval in ms (default: 500 = 2 Hz)
+  --lidar-rate <ms>              LiDAR publish interval in ms (default: 200 = 5 Hz)
+  --odom-rate <ms>               Odom publish interval in ms (default: 20 = 50 Hz)
+  --no-depth                     Disable depth image publishing
+  --camera-fov <deg>             Camera FOV in degrees (default: 80)
 
 Eval:
   --connect                      Connect to existing bridge (use with dimos)
@@ -321,6 +326,19 @@ async function main() {
     const numChannels = Math.max(1, parseInt(opts.channels as string) || 1);
     const evalWorkflow = opts.eval as string | undefined;
 
+    // Sensor publish rates (ms) — overrides browser defaults
+    const sensorRates: Record<string, number> = {};
+    if (opts["image-rate"]) sensorRates.images = parseInt(opts["image-rate"] as string);
+    if (opts["lidar-rate"]) sensorRates.lidar = parseInt(opts["lidar-rate"] as string);
+    if (opts["odom-rate"]) sensorRates.odom = parseInt(opts["odom-rate"] as string);
+
+    // Sensor enable/disable (depth only — color and lidar are essential)
+    const sensorEnable: Record<string, boolean> = {};
+    if (opts["no-depth"] === true) sensorEnable.depth = false;
+
+    // Camera FOV
+    const cameraFov = opts["camera-fov"] ? parseInt(opts["camera-fov"] as string) : undefined;
+
     // Build channel list for multi-instance mode
     const channels = numChannels > 1
       ? Array.from({ length: numChannels }, (_, i) => `page-${i}`)
@@ -330,7 +348,12 @@ async function main() {
     console.log(`[dimsim] Serving from: ${distDir}`);
 
     // LCM bridge is always active in dev mode (unlike eval --headless which disables it)
-    startBridgeServer({ port, distDir, scene, headless, channels });
+    startBridgeServer({
+      port, distDir, scene, headless, channels,
+      sensorRates: Object.keys(sensorRates).length > 0 ? sensorRates : undefined,
+      sensorEnable: Object.keys(sensorEnable).length > 0 ? sensorEnable : undefined,
+      cameraFov,
+    });
 
     if (headless) {
       if (channels) {

@@ -3,8 +3,9 @@
 /**
  * DimSim Bridge Server
  *
- * - TWO WebSocket channels: control (odom/cmd_vel) and sensors (images/lidar)
- *   Separate TCP streams so large sensor data never blocks real-time odom.
+ * - One control WebSocket plus multiple sensor WebSockets.
+ *   Separate TCP streams so large sensor data never blocks real-time odom
+ *   or other sensor streams.
  * - LCM multicast relay (WS ↔ LCM)
  * - Per-channel isolation for multi-page parallel evals
  * - Static file server for the pre-built DimSim frontend (dist/)
@@ -32,6 +33,9 @@ export interface BridgeServerOptions {
   headless?: boolean;
   channels?: string[];
   lcmBasePort?: number;
+  sensorRates?: Record<string, number>;
+  sensorEnable?: Record<string, boolean>;
+  cameraFov?: number;
 }
 
 /** Per-channel state: each channel gets its own LCM, physics, lidar, and WS client sets. */
@@ -44,6 +48,7 @@ interface ChannelState {
   sentSeqs: Set<number>;
   serverLidar: ServerLidar | null;
   serverPhysics: ServerPhysics | null;
+  embodiment: Record<string, any> | null;
 }
 
 export async function startBridgeServer(options: BridgeServerOptions) {
@@ -51,6 +56,7 @@ export async function startBridgeServer(options: BridgeServerOptions) {
     port, distDir, scene,
     evalOnly = false, headless = false,
     channels, lcmBasePort = DEFAULT_LCM_PORT,
+    sensorRates, sensorEnable, cameraFov,
   } = options;
 
   // Build channel list: if channels provided, use them; otherwise single default
@@ -73,6 +79,7 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       sentSeqs: new Set(),
       serverLidar: null,
       serverPhysics: null,
+      embodiment: null,
     };
 
     if (!evalOnly) {
@@ -137,12 +144,12 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       }
       console.log(`[bridge:${chState.name || "default"}] Rapier snapshot restored (removed ${bodiesToRemove.length} non-fixed bodies)`);
 
-      chState.serverPhysics = new ServerPhysics(chState.lcm, world, RAPIER, chState.sentSeqs);
+      chState.serverPhysics = new ServerPhysics(chState.lcm, world, RAPIER, chState.sentSeqs, chState.embodiment ?? undefined);
       if (spawnPos) {
         chState.serverPhysics.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
       }
 
-      chState.serverLidar = new ServerLidar(chState.lcm, world, RAPIER, chState.sentSeqs);
+      chState.serverLidar = new ServerLidar(chState.lcm, world, RAPIER, chState.sentSeqs, chState.embodiment ?? undefined);
       chState.serverLidar.setExcludeBody(chState.serverPhysics.getBody());
 
       chState.serverPhysics.setOnPoseUpdate((x, y, z, yaw) => {
@@ -174,13 +181,13 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       const ch = url.searchParams.get("ch") || "control";
       const channelParam = url.searchParams.get("channel");
       const chState = resolveChannel(channelParam);
-      const isSensor = ch === "sensors";
+      const isSensor = ch !== "control";
       const logPrefix = `[bridge:${chState.name || "default"}]`;
 
       if (isSensor) {
         // ── SENSOR WebSocket ──────────────────────────────────────────
-        socket.onopen = () => { chState.sensorClients.add(socket); console.log(`${logPrefix} sensor WS+ (${chState.sensorClients.size})`); };
-        socket.onclose = () => { chState.sensorClients.delete(socket); console.log(`${logPrefix} sensor WS-`); };
+        socket.onopen = () => { chState.sensorClients.add(socket); };
+        socket.onclose = () => { chState.sensorClients.delete(socket); };
         socket.onerror = () => chState.sensorClients.delete(socket);
 
         let _sensorLogN = 0;
@@ -216,9 +223,9 @@ export async function startBridgeServer(options: BridgeServerOptions) {
             const decoded = decodePacket(packet);
             if (decoded && decoded.type === "small") {
               _sensorLogN++;
-              if (_sensorLogN <= 3 || _sensorLogN % 10 === 0) {
+              if (_sensorLogN === 1 || _sensorLogN % 1000 === 0) {
                 const chName = decoded.channel.split("#")[0].replace("/", "");
-                console.log(`${logPrefix} sensor #${_sensorLogN} ${chName} ${(decoded.data.byteLength / 1024).toFixed(0)}KB`);
+                // quiet — sensor relay logging removed
               }
               chState.sentSeqs.add(chState.lcm.getNextSeq());
               chState.lcm.publishRaw(decoded.channel, decoded.data).catch(() => {});
@@ -232,7 +239,7 @@ export async function startBridgeServer(options: BridgeServerOptions) {
             chState.activeControlClient = socket;
           }
           chState.controlClients.add(socket);
-          console.log(`${logPrefix} control WS+ (${chState.controlClients.size})`);
+          // quiet
         };
         socket.onerror = () => chState.controlClients.delete(socket);
 
@@ -241,12 +248,39 @@ export async function startBridgeServer(options: BridgeServerOptions) {
         socket.onclose = () => {
           chState.controlClients.delete(socket);
           if (chState.activeControlClient === socket) chState.activeControlClient = null;
-          console.log(`${logPrefix} control WS- (${chState.controlClients.size})`);
+          // quiet
         };
 
         socket.onmessage = (event: MessageEvent) => {
-          // Text messages: relay to all other control clients in this channel
+          // Text messages: handle special types, relay the rest
           if (typeof event.data === "string") {
+            try {
+              const msg = JSON.parse(event.data);
+
+              // -- Embodiment config: store & reconfigure running systems --
+              if (msg.type === "embodimentConfig") {
+                chState.embodiment = msg.config ?? msg;
+                console.log(`${logPrefix} embodiment config stored:`, JSON.stringify(chState.embodiment));
+                if (chState.serverPhysics) chState.serverPhysics.reconfigure(chState.embodiment as any);
+                if (chState.serverLidar) chState.serverLidar.reconfigure(chState.embodiment as any);
+                // fall through to relay to browser
+              }
+
+              // -- Teleport: reposition physics agent, don't relay --
+              if (msg.type === "teleport") {
+                if (chState.serverPhysics && msg.x != null && msg.y != null && msg.z != null) {
+                  chState.serverPhysics.setPosition(msg.x, msg.y, msg.z);
+                  console.log(`${logPrefix} teleport to (${msg.x},${msg.y},${msg.z})`);
+                }
+                return; // don't relay teleport commands
+              }
+
+              // -- Physics collider add/remove: forward to Rapier world --
+              if (msg.type === "physicsColliderAdd" || msg.type === "physicsColliderRemove") {
+                // These are handled by the browser's physics; just relay
+              }
+            } catch { /* not JSON, relay as-is */ }
+
             for (const client of chState.controlClients) {
               if (client !== socket && client.readyState === WebSocket.OPEN) {
                 try { client.send(event.data); } catch { /* ignore */ }
@@ -279,7 +313,10 @@ export async function startBridgeServer(options: BridgeServerOptions) {
     if (url.pathname === "/" || url.pathname === "/index.html") {
       try {
         let html = await Deno.readTextFile(`${distDir}/index.html`);
-        const inject = `<script>window.__dimosMode=true;window.__dimosScene="${scene || "apt"}";${headless ? "window.__dimosHeadless=true;" : ""}</script>`;
+        const ratesJs = sensorRates ? `window.__dimosSensorRates=${JSON.stringify(sensorRates)};` : "";
+        const enableJs = sensorEnable ? `window.__dimosSensorEnable=${JSON.stringify(sensorEnable)};` : "";
+        const fovJs = cameraFov ? `window.__dimosCameraFov=${cameraFov};` : "";
+        const inject = `<script>window.__dimosMode=true;window.__dimosScene="${scene || "apt"}";${headless ? "window.__dimosHeadless=true;" : ""}${ratesJs}${enableJs}${fovJs}</script>`;
         html = html.replace("</head>", `${inject}\n</head>`);
         return new Response(html, { headers: { "content-type": "text/html; charset=utf-8" } });
       } catch {
