@@ -25,6 +25,9 @@ const SNAPSHOT_MAGIC = 0x4453534E;
 const DEFAULT_LCM_PORT = 7667;
 const DEFAULT_LCM_HOST = "239.255.76.67";
 
+/** Topic remap table: maps original LCM channel names to remapped names. */
+export type TopicRemapTable = Map<string, string>;
+
 export interface BridgeServerOptions {
   port: number;
   distDir: string;
@@ -36,6 +39,7 @@ export interface BridgeServerOptions {
   sensorRates?: Record<string, number>;
   sensorEnable?: Record<string, boolean>;
   cameraFov?: number;
+  topicRemap?: TopicRemapTable;
 }
 
 /** Per-channel state: each channel gets its own LCM, physics, lidar, and WS client sets. */
@@ -51,12 +55,43 @@ interface ChannelState {
   embodiment: Record<string, any> | null;
 }
 
+/** Apply topic remap: if the channel matches a remap entry, return the remapped name. */
+function remapChannel(channel: string, remap: TopicRemapTable): string {
+  // Try exact match first
+  const exact = remap.get(channel);
+  if (exact) return exact;
+  // Try matching just the topic part (before #msgtype)
+  const hashIdx = channel.indexOf("#");
+  if (hashIdx > 0) {
+    const topic = channel.slice(0, hashIdx);
+    const msgType = channel.slice(hashIdx);
+    const remapped = remap.get(topic);
+    if (remapped) return remapped + msgType;
+  }
+  return channel;
+}
+
+/** Reverse remap: find original channel name from a remapped one. */
+function reverseRemapChannel(channel: string, remap: TopicRemapTable): string {
+  for (const [orig, mapped] of remap) {
+    if (channel === mapped) return orig;
+    const hashIdx = channel.indexOf("#");
+    if (hashIdx > 0) {
+      const topic = channel.slice(0, hashIdx);
+      const msgType = channel.slice(hashIdx);
+      if (topic === mapped) return orig + msgType;
+    }
+  }
+  return channel;
+}
+
 export async function startBridgeServer(options: BridgeServerOptions) {
   const {
     port, distDir, scene,
     evalOnly = false, headless = false,
     channels, lcmBasePort = DEFAULT_LCM_PORT,
     sensorRates, sensorEnable, cameraFov,
+    topicRemap = new Map(),
   } = options;
 
   // Build channel list: if channels provided, use them; otherwise single default
@@ -144,12 +179,12 @@ export async function startBridgeServer(options: BridgeServerOptions) {
       }
       console.log(`[bridge:${chState.name || "default"}] Rapier snapshot restored (removed ${bodiesToRemove.length} non-fixed bodies)`);
 
-      chState.serverPhysics = new ServerPhysics(chState.lcm, world, RAPIER, chState.sentSeqs, chState.embodiment ?? undefined);
+      chState.serverPhysics = new ServerPhysics(chState.lcm, world, RAPIER, chState.sentSeqs, chState.embodiment ?? undefined, topicRemap);
       if (spawnPos) {
         chState.serverPhysics.setPosition(spawnPos.x, spawnPos.y, spawnPos.z);
       }
 
-      chState.serverLidar = new ServerLidar(chState.lcm, world, RAPIER, chState.sentSeqs, chState.embodiment ?? undefined);
+      chState.serverLidar = new ServerLidar(chState.lcm, world, RAPIER, chState.sentSeqs, chState.embodiment ?? undefined, topicRemap);
       chState.serverLidar.setExcludeBody(chState.serverPhysics.getBody());
 
       chState.serverPhysics.setOnPoseUpdate((x, y, z, yaw) => {
@@ -227,8 +262,9 @@ export async function startBridgeServer(options: BridgeServerOptions) {
                 const chName = decoded.channel.split("#")[0].replace("/", "");
                 // quiet — sensor relay logging removed
               }
+              const remappedCh = remapChannel(decoded.channel, topicRemap);
               chState.sentSeqs.add(chState.lcm.getNextSeq());
-              chState.lcm.publishRaw(decoded.channel, decoded.data).catch(() => {});
+              chState.lcm.publishRaw(remappedCh, decoded.data).catch(() => {});
             }
           } catch { /* ignore */ }
         };
@@ -300,8 +336,9 @@ export async function startBridgeServer(options: BridgeServerOptions) {
                 return;
               }
 
+              const remappedCh = remapChannel(decoded.channel, topicRemap);
               chState.sentSeqs.add(chState.lcm.getNextSeq());
-              chState.lcm.publishRaw(decoded.channel, decoded.data).catch(() => {});
+              chState.lcm.publishRaw(remappedCh, decoded.data).catch(() => {});
             }
           } catch { /* ignore */ }
         };

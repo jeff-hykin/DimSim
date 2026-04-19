@@ -11,6 +11,7 @@ import {
   std_msgs,
 } from "@dimos/msgs";
 import type { LCM } from "../vendor/lcm/lcm.ts";
+import type { TopicRemapTable } from "./server.ts";
 
 // -- Lidar constants (must match engine.js) -----------------------------------
 const NUM_POINTS = 15000;
@@ -20,7 +21,7 @@ const V_MIN_RAD = (-30 * Math.PI) / 180;
 const V_MAX_RAD = (15 * Math.PI) / 180;
 const RATE_MS = 100; // 10 Hz
 
-const CH_LIDAR = "/lidar#sensor_msgs.PointCloud2";
+const DEFAULT_CH_LIDAR = "/lidar#sensor_msgs.PointCloud2";
 
 // Agent capsule geometry → lidar mount offset (must match engine.js)
 const DEFAULT_HALF_HEIGHT = 0.25;
@@ -97,6 +98,7 @@ export class ServerLidar {
   private publishing = false; // busy guard — skip scan if previous publish still in flight
   private excludeBody: any = null; // rigid body to exclude from raycasting (agent's own colliders)
   private lidarYOffset: number;
+  private chLidar: string;
 
   // Current robot pose (Three.js Y-up world frame)
   private px = 0;
@@ -110,12 +112,16 @@ export class ServerLidar {
 
   private ray: any; // Reusable Ray object (avoids 20k allocations per scan)
 
-  constructor(lcm: LCM, rapierWorld: any, RAPIER: any, sentSeqs: Set<number>, embodiment?: LidarEmbodimentConfig) {
+  constructor(lcm: LCM, rapierWorld: any, RAPIER: any, sentSeqs: Set<number>, embodiment?: LidarEmbodimentConfig, topicRemap?: TopicRemapTable) {
     this.lcm = lcm;
     this.world = rapierWorld;
     this.RAPIER = RAPIER;
     this.sentSeqs = sentSeqs;
     this.ray = new RAPIER.Ray({ x: 0, y: 0, z: 0 }, { x: 0, y: 0, z: 1 });
+
+    // Resolve remapped topic name
+    const remap = topicRemap ?? new Map();
+    this.chLidar = remap.get("/lidar") ? remap.get("/lidar")! + "#sensor_msgs.PointCloud2" : DEFAULT_CH_LIDAR;
 
     const halfH = embodiment?.halfHeight ?? DEFAULT_HALF_HEIGHT;
     const radius = embodiment?.radius ?? DEFAULT_RADIUS;
@@ -279,6 +285,6 @@ export class ServerLidar {
       // Mark seq for echo filtering (prevent server re-forwarding to browser WS)
       this.sentSeqs.add(this.lcm.getNextSeq());
       // Publish directly to LCM — no WS hop (await so buffer pressure is felt)
-      await this.lcm.publish(CH_LIDAR, msg);
+      await this.lcm.publish(this.chLidar, msg);
   }
 }

@@ -15,6 +15,7 @@
 import { geometry_msgs, std_msgs } from "@dimos/msgs";
 
 import type { LCM } from "../vendor/lcm/lcm.ts";
+import type { TopicRemapTable } from "./server.ts";
 
 // -- Agent dimensions (must match AiAvatar.js / engine.js) --------------------
 const DEFAULT_AGENT_RADIUS = 0.12;
@@ -28,6 +29,10 @@ const DEFAULT_GRAVITY_Y = -9.81;
 const DEFAULT_SPEED_SCALE = 3.0; // Multiplier for cmd_vel (linear + angular)
 const DEFAULT_TURN_SCALE = 3.0;
 const DEFAULT_MAX_ALTITUDE = 50;
+
+// -- Default LCM channel names ------------------------------------------------
+const DEFAULT_CH_ODOM = "/odom#geometry_msgs.PoseStamped";
+const DEFAULT_CH_CMD_VEL = "/cmd_vel#geometry_msgs.Twist";
 
 /** Embodiment configuration passed from SceneClient / control channel. */
 export interface EmbodimentConfig {
@@ -45,8 +50,6 @@ export interface EmbodimentConfig {
   maxAltitude?: number;
 }
 
-const CH_ODOM = "/odom#geometry_msgs.PoseStamped";
-const CH_CMD_VEL = "/cmd_vel#geometry_msgs.Twist";
 const CMD_VEL_TIMEOUT_MS = 500;
 
 // -- ServerPhysics ------------------------------------------------------------
@@ -62,6 +65,10 @@ export class ServerPhysics {
   private spineCollider: any;
   private controller: any;
   private timer: ReturnType<typeof setInterval> | null = null;
+
+  // Topic remap
+  private chOdom: string;
+  private chCmdVel: string;
 
   // Embodiment params
   private embodimentType: string;
@@ -96,11 +103,17 @@ export class ServerPhysics {
     RAPIER: any,
     sentSeqs: Set<number>,
     embodiment?: EmbodimentConfig,
+    topicRemap?: TopicRemapTable,
   ) {
     this.lcm = lcm;
     this.world = rapierWorld;
     this.RAPIER = RAPIER;
     this.sentSeqs = sentSeqs;
+
+    // Resolve remapped topic names
+    const remap = topicRemap ?? new Map();
+    this.chOdom = remap.get("/odom") ? remap.get("/odom")! + "#geometry_msgs.PoseStamped" : DEFAULT_CH_ODOM;
+    this.chCmdVel = remap.get("/cmd_vel") ? remap.get("/cmd_vel")! + "#geometry_msgs.Twist" : DEFAULT_CH_CMD_VEL;
 
     // Apply embodiment config with defaults
     this.embodimentType = embodiment?.embodimentType ?? "ground";
@@ -228,7 +241,7 @@ export class ServerPhysics {
 
   /** Subscribe to cmd_vel on LCM. */
   subscribeCmdVel(): void {
-    this.lcm.subscribe(CH_CMD_VEL, geometry_msgs.Twist, (msg: any) => {
+    this.lcm.subscribe(this.chCmdVel, geometry_msgs.Twist, (msg: any) => {
       this.handleCmdVel(msg.data);
     });
     // quiet
@@ -377,7 +390,7 @@ export class ServerPhysics {
 
     try {
       this.sentSeqs.add(this.lcm.getNextSeq());
-      this.lcm.publishRaw(CH_ODOM, odom.encode()).catch(() => {});
+      this.lcm.publishRaw(this.chOdom, odom.encode()).catch(() => {});
     } catch (e: unknown) {
       if (this.seq <= 3) console.warn("[physics] odom publish error:", e);
     }

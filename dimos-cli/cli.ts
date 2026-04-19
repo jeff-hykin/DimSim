@@ -15,7 +15,7 @@
  */
 
 import { resolve, dirname, fromFileUrl } from "@std/path";
-import { startBridgeServer } from "./bridge/server.ts";
+import { startBridgeServer, type TopicRemapTable } from "./bridge/server.ts";
 import { launchHeadless, launchMultiPage, type RenderMode } from "./headless/launcher.ts";
 import { runEvals, runEvalsMultiPage, collectWorkflows, toJunitXml, type EvalResult } from "./eval/runner.ts";
 import { getDimsimHome, getDistDir, setup, sceneInstall, sceneList, sceneRemove } from "./setup.ts";
@@ -91,6 +91,7 @@ Dev:
   --odom-rate <ms>               Odom publish interval in ms (default: 20 = 50 Hz)
   --no-depth                     Disable depth image publishing
   --camera-fov <deg>             Camera FOV in degrees (default: 80)
+  --topic-remap <map>            Remap LCM topics: /old=/new,/old2=/new2
 
 Eval:
   --connect                      Connect to existing bridge (use with dimos)
@@ -339,6 +340,24 @@ async function main() {
     // Camera FOV
     const cameraFov = opts["camera-fov"] ? parseInt(opts["camera-fov"] as string) : undefined;
 
+    // Topic remap: --topic-remap /odom=/sim/odom,/cmd_vel=/sim/cmd_vel
+    const topicRemap: TopicRemapTable = new Map();
+    if (opts["topic-remap"] && typeof opts["topic-remap"] === "string") {
+      for (const pair of (opts["topic-remap"] as string).split(",")) {
+        const eqIdx = pair.indexOf("=");
+        if (eqIdx > 0) {
+          const from = pair.slice(0, eqIdx).trim();
+          const to = pair.slice(eqIdx + 1).trim();
+          if (from && to) {
+            topicRemap.set(from, to);
+          }
+        }
+      }
+      if (topicRemap.size > 0) {
+        console.log(`[dimsim] Topic remap: ${[...topicRemap.entries()].map(([f, t]) => `${f} → ${t}`).join(", ")}`);
+      }
+    }
+
     // Build channel list for multi-instance mode
     const channels = numChannels > 1
       ? Array.from({ length: numChannels }, (_, i) => `page-${i}`)
@@ -353,6 +372,7 @@ async function main() {
       sensorRates: Object.keys(sensorRates).length > 0 ? sensorRates : undefined,
       sensorEnable: Object.keys(sensorEnable).length > 0 ? sensorEnable : undefined,
       cameraFov,
+      topicRemap: topicRemap.size > 0 ? topicRemap : undefined,
     });
 
     if (headless) {
