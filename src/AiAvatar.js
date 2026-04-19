@@ -1222,7 +1222,11 @@ export class AiAvatar {
         // Target height: roughly capsule height (halfHeight * 2 + radius * 2)
         const targetHeight = this.halfHeight * 2 + this.radius * 2;
         const scaleFactor = targetHeight / (size.y || 1);
-        this.model.scale.setScalar(scaleFactor);
+        // Y-squash: the current GLB has no rig, so we can't pose it into a
+        // proper crouch. Compress Y instead so the robot reads as a low-slung
+        // quadruped rather than a tall upright one. Purely cosmetic — camera
+        // POV (GO2_CAMERA_HEIGHT in engine.js) is the accurate signal.
+        this.model.scale.set(scaleFactor, scaleFactor * 0.6, scaleFactor);
 
         // Re-center: the group origin is at the physics body center,
         // which sits at (halfHeight + radius) above the ground.
@@ -1234,11 +1238,8 @@ export class AiAvatar {
         this.model.position.z -= newCenter.z;
         // Offset down by the body's center height so feet are on the floor
         this.model.position.y = -newMin.y - (this.halfHeight + this.radius);
-        // Keep model forward extent aligned with capsule/cone forward convention.
-        bbox.setFromObject(this.model);
-        const desiredFrontZ = this.radius * 1.1;
-        const frontShift = desiredFrontZ - bbox.max.z;
-        this.model.position.z += frontShift;
+        // Keep the model centered on the group origin so yaw rotation pivots
+        // around the body's geometric center (between the legs), not the head.
 
         // The agent's forward convention is +Z (yaw=0 looks along +Z).
         // This robot model already faces +Z, so no rotation needed.

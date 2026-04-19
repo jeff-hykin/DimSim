@@ -26,7 +26,7 @@ let worldBody = null;
 let playerBody = null;
 let playerCollider = null;
 let flyMode = true;
-let ghostMode = false;
+let ghostMode = true;
 let characterController = null;
 let _rapierStepFaultCount = 0;
 let walkVerticalVel = 0;
@@ -40,6 +40,15 @@ const PLAYER_RADIUS = 0.12;
 const PLAYER_HALF_HEIGHT = 0.25;
 const PLAYER_EYE_HEIGHT = PLAYER_HALF_HEIGHT + PLAYER_RADIUS + 0.2; // camera above body origin
 const LIDAR_MOUNT_HEIGHT = 0.35; // Go2 lidar mount height above ground
+// Real Go2 front camera height above ground in its home/operating crouch pose.
+// Used for agent-POV captures so the rendered view matches what the hardware
+// camera would see (low, not eye-level). ~0.30 m matches the MuJoCo go2.xml
+// home keyframe (thigh 0.9, calf -1.8) which the Go2 actually stands in.
+const GO2_CAMERA_HEIGHT = 0.30;
+// Go2 front RGB-D camera is mounted on the front of the head, forward of the
+// body center. Offsetting places the camera origin outside the robot mesh so
+// POV captures don't render the inside of the body.
+const GO2_CAMERA_FORWARD = 0.18;
 
 const canvas = document.getElementById("c");
 const statusEl = document.getElementById("status");
@@ -88,6 +97,7 @@ const simLidarMultiReturnBtn = document.getElementById("sim-lidar-multireturn");
 // sensor data (RGB, depth, LiDAR) published as LCM packets via WebSocket bridge.
 const _dimosParams = new URLSearchParams(window.location.search);
 const dimosMode = _dimosParams.get("dimos") === "1" || window.__dimosMode === true;
+if (dimosMode) document.body.classList.add("dimos-mode");
 const dimosScene = _dimosParams.get("scene") || window.__dimosScene || null;
 let simSensorViewMode = "rgb"; // "rgb" | "rgbd" | "lidar"
 let simCompareView = false; // show RGB + RGB-D + LiDAR side-by-side
@@ -2827,10 +2837,14 @@ function updateAgentCameraFollow(dt) {
   const yaw = agent.group?.rotation?.y ?? 0;
   const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
   
-  // Place camera at agent's eye position (same as visionCapture.js)
-  const eyeHeight = (agent.halfHeight || 0.25) + (agent.radius || 0.12) + 0.15;
-  const eyeY = ay + eyeHeight;
-  camera.position.set(ax, eyeY, az);
+  // Place camera at the real Go2 front-camera mount: GO2_CAMERA_HEIGHT above
+  // the ground and GO2_CAMERA_FORWARD along the agent's heading so the origin
+  // sits outside the body mesh (Go2's head-mounted RGB-D, not body-center).
+  const feetY = ay - ((agent.halfHeight || 0.25) + (agent.radius || 0.12));
+  const eyeY = feetY + GO2_CAMERA_HEIGHT;
+  const eyeX = ax + Math.sin(yaw) * GO2_CAMERA_FORWARD;
+  const eyeZ = az + Math.cos(yaw) * GO2_CAMERA_FORWARD;
+  camera.position.set(eyeX, eyeY, eyeZ);
   
   // Compute forward direction exactly like visionCapture.js does
   const cp = Math.cos(pitch);
@@ -2840,7 +2854,7 @@ function updateAgentCameraFollow(dt) {
   const fz = Math.cos(yaw) * cp;
   
   // Use lookAt to match the VLM capture camera
-  camera.lookAt(ax + fx, eyeY + fy, az + fz);
+  camera.lookAt(eyeX + fx, eyeY + fy, eyeZ + fz);
   
   // Hide the agent's own mesh so it doesn't block the view
   if (agent.group) agent.group.visible = false;
@@ -5756,7 +5770,7 @@ async function _doRapierInit() {
     RAPIER.RigidBodyDesc.kinematicPositionBased().setTranslation(0, 3, 0)
   );
   playerCollider = rapierWorld.createCollider(
-    RAPIER.ColliderDesc.capsule(halfHeight, radius).setFriction(0.0),
+    RAPIER.ColliderDesc.capsule(halfHeight, radius).setFriction(0.0).setSensor(ghostMode),
     playerBody
   );
 
@@ -6257,6 +6271,8 @@ simLevelImportEl?.addEventListener("change", async (e) => {
     setStatus("Loading level...");
     const text = await file.text();
     await importLevelFromJSON(JSON.parse(text));
+    await ensureRapierLoaded();
+    spawnPlayerInsideScene();
     setStatus("Level loaded. Click to enter, then spawn an agent.");
   } catch (err) {
     console.error(err);
@@ -6292,6 +6308,47 @@ function teleportPlayerTo(x, y, z) {
   if (!playerBody) return;
   playerBody.setTranslation({ x, y, z }, true);
   playerBody.setLinvel({ x: 0, y: 0, z: 0 }, true);
+}
+
+// Find a reasonable interior floor Y by casting a ray straight down through the
+// loaded scene meshes and picking the lowest up-facing surface. This skips the
+// roof when a building has both a roof and an interior floor, so the player
+// lands inside rather than on top.
+function _findSceneFloorY(x = 0, z = 0) {
+  const bbox = new THREE.Box3();
+  const tmp = new THREE.Box3();
+  try { tmp.setFromObject(assetsGroup); if (tmp.isEmpty() === false) bbox.union(tmp); } catch {}
+  try { tmp.setFromObject(primitivesGroup); if (tmp.isEmpty() === false) bbox.union(tmp); } catch {}
+  const fromY = bbox.isEmpty() ? 50 : bbox.max.y + 5;
+  const raycaster = new THREE.Raycaster(
+    new THREE.Vector3(x, fromY, z),
+    new THREE.Vector3(0, -1, 0),
+    0,
+    fromY + 500,
+  );
+  const hits = [
+    ...raycaster.intersectObject(assetsGroup, true),
+    ...raycaster.intersectObject(primitivesGroup, true),
+  ];
+  let floorY = null;
+  for (const h of hits) {
+    const n = h.face?.normal;
+    if (!n) continue;
+    // Transform face normal to world space to test "up-facing"
+    const worldN = n.clone().transformDirection(h.object.matrixWorld);
+    if (worldN.y < 0.5) continue; // skip walls/ceilings
+    if (floorY == null || h.point.y < floorY) floorY = h.point.y;
+  }
+  return floorY;
+}
+
+function spawnPlayerInsideScene() {
+  const floorY = _findSceneFloorY(0, 0);
+  if (floorY == null) return false;
+  const y = floorY + PLAYER_EYE_HEIGHT;
+  camera.position.set(0, y, 0);
+  teleportPlayerTo(0, y, 0);
+  return true;
 }
 
 
@@ -7200,6 +7257,7 @@ if (dimosMode) {
       // 2. Auto-spawn agent (wait for physics to settle)
       await new Promise((r) => setTimeout(r, 1500));
       await ensureRapierLoaded();
+      spawnPlayerInsideScene();
       const agent = createAiAgent({ ephemeral: false });
       aiAgents.push(agent);
       // Place agent at a default spawn point
@@ -7286,16 +7344,22 @@ if (dimosMode) {
         const yaw = agent.group?.rotation?.y ?? 0;
         const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
         const cp = Math.cos(pitch), sp = Math.sin(pitch);
-        const eyeY = ay + PLAYER_EYE_HEIGHT * 0.9;
-        _dimosCapCam.position.set(ax, eyeY, az);
-        _dimosCapCam.lookAt(ax + Math.sin(yaw)*cp, eyeY + sp, az + Math.cos(yaw)*cp);
+        const feetY = ay - ((agent.halfHeight || 0.25) + (agent.radius || 0.12));
+        const eyeY = feetY + GO2_CAMERA_HEIGHT;
+        const eyeX = ax + Math.sin(yaw) * GO2_CAMERA_FORWARD;
+        const eyeZ = az + Math.cos(yaw) * GO2_CAMERA_FORWARD;
+        _dimosCapCam.position.set(eyeX, eyeY, eyeZ);
+        _dimosCapCam.lookAt(eyeX + Math.sin(yaw)*cp, eyeY + sp, eyeZ + Math.cos(yaw)*cp);
         _dimosCapCam.updateProjectionMatrix();
         _dimosCapCam.updateMatrixWorld(true);
 
         const prev = renderer.getRenderTarget();
+        const prevAgentVisible = agent.group?.visible;
+        if (agent.group) agent.group.visible = false;
         renderer.setRenderTarget(_dimosCapTarget);
         renderer.render(scene, _dimosCapCam);
         renderer.setRenderTarget(prev);
+        if (agent.group) agent.group.visible = prevAgentVisible;
 
         renderer.readRenderTargetPixels(_dimosCapTarget, 0, 0, _dimosCapW, _dimosCapH, _dimosCapBuf);
         // Flip Y — return raw RGBA pixels (no JPEG encode)
@@ -7313,9 +7377,12 @@ if (dimosMode) {
         const yaw = agent.group?.rotation?.y ?? 0;
         const pitch = typeof agent.pitch === "number" ? agent.pitch : 0;
         const cp = Math.cos(pitch), sp = Math.sin(pitch);
-        const eyeY = ay + PLAYER_EYE_HEIGHT * 0.9;
-        _dimosCapCam.position.set(ax, eyeY, az);
-        _dimosCapCam.lookAt(ax + Math.sin(yaw)*cp, eyeY + sp, az + Math.cos(yaw)*cp);
+        const feetY = ay - ((agent.halfHeight || 0.25) + (agent.radius || 0.12));
+        const eyeY = feetY + GO2_CAMERA_HEIGHT;
+        const eyeX = ax + Math.sin(yaw) * GO2_CAMERA_FORWARD;
+        const eyeZ = az + Math.cos(yaw) * GO2_CAMERA_FORWARD;
+        _dimosCapCam.position.set(eyeX, eyeY, eyeZ);
+        _dimosCapCam.lookAt(eyeX + Math.sin(yaw)*cp, eyeY + sp, eyeZ + Math.cos(yaw)*cp);
         _dimosCapCam.updateProjectionMatrix();
         _dimosCapCam.updateMatrixWorld(true);
 
@@ -7345,6 +7412,8 @@ if (dimosMode) {
         tagsGroup.visible = false;
         lidarVizGroup.visible = false;
         rgbdPcOverlayGroup.visible = false;
+        const savedAgentVisible = agent.group?.visible;
+        if (agent.group) agent.group.visible = false;
 
         renderer.setRenderTarget(_dimosDepthTarget);
         renderer.setClearColor(0x000000, RGBD_CLEAR_ALPHA);
@@ -7363,6 +7432,7 @@ if (dimosMode) {
         tagsGroup.visible = savedTags;
         lidarVizGroup.visible = savedLidarViz;
         rgbdPcOverlayGroup.visible = savedRgbdPc;
+        if (agent.group) agent.group.visible = savedAgentVisible;
         rgbdMetricMaterial.uniforms.uDepthTex.value = prevDepthTex;
         rgbdMetricMaterial.uniforms.uNear.value = prevNear;
         rgbdMetricMaterial.uniforms.uFar.value = prevFar;
@@ -7630,19 +7700,8 @@ if (dimosMode) {
         enableAgentCameraFollow(agent.id);
       }
 
-      // 7a. dimos mode UI cleanup
-      if (!window.__dimosHeadless) {
-        const sidePanel = document.getElementById("agent-panel");
-        if (sidePanel) sidePanel.style.display = "none";
-        const panelOpen = document.getElementById("sim-panel-open");
-        if (panelOpen) panelOpen.style.display = "none";
-        const cmdBar = document.getElementById("agent-command-bar");
-        if (cmdBar) cmdBar.style.display = "none";
-        const hints = document.createElement("div");
-        hints.style.cssText = "position:fixed;bottom:8px;left:8px;z-index:99999;background:rgba(0,0,0,0.7);color:rgba(255,255,255,0.8);font:12px/1.6 'Inter',sans-serif;padding:8px 14px;border-radius:8px;pointer-events:none;user-select:none;";
-        hints.innerHTML = "<b>WASD</b> move &nbsp; <b>Space</b> up &nbsp; <b>Shift</b> down &nbsp; <b>G</b> ghost mode";
-        document.body.appendChild(hints);
-      }
+      // 7a. dimos mode UI cleanup handled in CSS via body.dimos-mode class
+      // (panel hiding) and .shortcuts-floating in index.html (WASD strip).
 
       // 7b. Debug panel (integration diagnostics) — hidden for now
       if (false && !window.__dimosHeadless) {
